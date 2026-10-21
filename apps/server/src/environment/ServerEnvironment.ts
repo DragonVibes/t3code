@@ -271,6 +271,9 @@ export const make = Effect.gen(function* () {
     },
   };
 
+  // The publish opt-in and relay link change at runtime (`t3 connect
+  // publish`, the client settings toggle), so the capability is read per
+  // descriptor request rather than baked in at startup.
   const runtimeCapabilities = Effect.all({
     agentActivityPublishing: readAgentActivityPublishingActive(secrets),
     appleOnDeviceTranscription: appleSpeech.available,
