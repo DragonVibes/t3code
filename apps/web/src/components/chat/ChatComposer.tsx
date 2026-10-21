@@ -1460,7 +1460,6 @@ export interface ChatComposerHandle {
   isModelPickerOpen: () => boolean;
   isCaretAtStart: () => boolean;
   compactContext: () => void;
-  /** Starts dictation, or stops and transcribes. False when voice input is not offered here. */
   toggleDictation: () => boolean;
   readSnapshot: () => {
     value: string;
@@ -2085,18 +2084,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
   const readVoiceDraftStable = useStableCallback(() => {
     const text = promptRef.current;
-    return {
-      ownerKey: composerDraftTargetKey,
-      text,
-      selection: composerEditorRef.current?.readSelectionRange() ?? {
-        start: text.length,
-        end: text.length,
-      },
-    };
+    const editor = composerEditorRef.current;
+    // The editor's selection only indexes the text it was read from.
+    const selection =
+      editor && editor.readSnapshot().value === text
+        ? editor.readSelectionRange()
+        : { start: text.length, end: text.length };
+    return { ownerKey: composerDraftTargetKey, text, selection };
   });
-  // Voice input must be known before sendDisabledReason, but the commit goes through
-  // applyPromptReplacement, which is declared further down. The effect below the
-  // declaration fills this in, since a closure may not capture it earlier.
+  // sendDisabledReason needs voice input before applyPromptReplacement is declared, and
+  // the React Compiler rejects a closure that captures a const declared later. The
+  // layout effect below that declaration fills this in.
   const voiceCommitRef = useRef<
     ((text: string, selection: { readonly start: number; readonly end: number }) => void) | null
   >(null);
@@ -6449,6 +6447,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       getTimelineScrollableNode,
       isTimelineAtLogicalEnd,
       setIsComposerScrollCollapsed,
+      showComposerVoiceAction,
+      voiceInput.busy,
+      voiceInput.toggle,
     ],
   );
 

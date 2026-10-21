@@ -7,7 +7,6 @@ import {
 
 import { isElectron } from "~/env";
 
-/** Containers the environment accepts, best first. Safari records only mp4. */
 const PREFERRED_AUDIO_MIME_TYPES = [
   "audio/webm;codecs=opus",
   "audio/webm",
@@ -17,7 +16,6 @@ const PREFERRED_AUDIO_MIME_TYPES = [
 ] as const;
 
 export interface VoiceLevelMeter {
-  /** Current microphone level from 0 (silence) to 1 (full scale). */
   readLevel(): number;
   close(): void;
 }
@@ -29,7 +27,6 @@ export type MediaRecorderLike = Pick<
 
 export interface VoiceRecorderEnvironment {
   readonly getUserMedia: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
-  /** Null when the Permissions API cannot answer for the microphone. */
   readonly queryMicrophonePermission: () => Promise<PermissionState | null>;
   readonly isTypeSupported: (mimeType: string) => boolean;
   readonly createMediaRecorder: (
@@ -39,17 +36,14 @@ export interface VoiceRecorderEnvironment {
   readonly createLevelMeter: (stream: MediaStream) => VoiceLevelMeter | null;
   readonly createObjectURL: (blob: Blob) => string;
   readonly revokeObjectURL: (url: string) => void;
-  /** True where the page cannot prompt again, so a refusal needs a settings change. */
   readonly denialIsPermanent: boolean;
 }
 
 export interface WebVoiceRecorder {
   readonly recorder: VoiceRecorder;
-  /** Epoch milliseconds when the current recording started, null otherwise. */
   readonly startedAt: number | null;
   requestPermission(): Promise<{ readonly granted: boolean; readonly canAskAgain: boolean }>;
   configureRecording(): Promise<void>;
-  /** Stops every microphone track. Safe to call at any time. */
   releaseRecording(): Promise<void>;
   deleteRecording(uri: string): void;
   readLevel(): number;
@@ -70,18 +64,18 @@ export function createWebVoiceRecorder(
   environment: VoiceRecorderEnvironment,
   onStatus: (status: VoiceRecorderStatus) => void,
 ): WebVoiceRecorder {
-  // Acquired by requestPermission, because a browser only prompts through
-  // getUserMedia, and adopted by configureRecording.
-  let pendingStream: MediaStream | null = null;
+  let promptedStream: MediaStream | null = null;
   let stream: MediaStream | null = null;
   let meter: VoiceLevelMeter | null = null;
   let mediaRecorder: MediaRecorderLike | null = null;
   let started = false;
+  let stopRequested = false;
   let stopped: Promise<void> | null = null;
   let chunks: Blob[] = [];
   let recordingUri: string | null = null;
   let limitTimer: ReturnType<typeof setTimeout> | null = null;
   let startedAt: number | null = null;
+  let releases = 0;
 
   const clearLimitTimer = () => {
     if (limitTimer !== null) clearTimeout(limitTimer);
@@ -111,6 +105,11 @@ export function createWebVoiceRecorder(
         clearLimitTimer();
         startedAt = null;
         resolve();
+        // A stop nobody asked for means the tracks ended, such as a device
+        // unplugged, so hand over what was captured instead of recording forever.
+        if (!stopRequested) {
+          onStatus({ isFinished: true, hasError: false, error: null, url: recordingUri });
+        }
       });
       next.addEventListener("error", () => {
         onStatus({
@@ -122,10 +121,12 @@ export function createWebVoiceRecorder(
       });
       mediaRecorder = next;
       started = false;
+      stopRequested = false;
       stopped = promise;
     },
     record: ({ forDuration }) => {
       if (!mediaRecorder) throw new Error("The recorder is not prepared.");
+      clearLimitTimer();
       mediaRecorder.start();
       started = true;
       startedAt = Date.now();
@@ -144,6 +145,7 @@ export function createWebVoiceRecorder(
       // A recorder that never started fires no stop event, and one whose
       // tracks ended already fired it.
       if (started) {
+        stopRequested = true;
         if (current.state !== "inactive") current.stop();
         await stopped;
       }
@@ -160,10 +162,15 @@ export function createWebVoiceRecorder(
       return startedAt;
     },
     requestPermission: async () => {
-      stopTracks(pendingStream);
-      pendingStream = null;
+      stopTracks(promptedStream);
+      promptedStream = null;
+      const releasesBefore = releases;
       try {
-        pendingStream = await environment.getUserMedia({ audio: true });
+        const granted = await environment.getUserMedia({ audio: true });
+        // A cancel while the prompt was open already released, so this stream
+        // has no owner left to stop it later.
+        if (releases !== releasesBefore) stopTracks(granted);
+        else promptedStream = granted;
         return { granted: true, canAskAgain: true };
       } catch (error) {
         if (!isPermissionRefusal(error)) throw error;
@@ -176,18 +183,19 @@ export function createWebVoiceRecorder(
       }
     },
     configureRecording: async () => {
-      stream = pendingStream ?? (await environment.getUserMedia({ audio: true }));
-      pendingStream = null;
+      stream = promptedStream ?? (await environment.getUserMedia({ audio: true }));
+      promptedStream = null;
       meter = environment.createLevelMeter(stream);
     },
     releaseRecording: async () => {
+      releases += 1;
       clearLimitTimer();
       meter?.close();
       meter = null;
       stopTracks(stream);
       stream = null;
-      stopTracks(pendingStream);
-      pendingStream = null;
+      stopTracks(promptedStream);
+      promptedStream = null;
       startedAt = null;
     },
     deleteRecording: (uri) => {
@@ -222,16 +230,12 @@ export function createBrowserVoiceRecorderEnvironment(): VoiceRecorderEnvironmen
     getUserMedia: (constraints) =>
       navigator.mediaDevices?.getUserMedia
         ? navigator.mediaDevices.getUserMedia(constraints)
-        : // Plain-http origins other than localhost have no mediaDevices at all.
-          Promise.reject(
+        : Promise.reject(
             new DOMException("Microphone access needs a secure context.", "SecurityError"),
           ),
     queryMicrophonePermission: async () => {
       try {
-        // lib.dom's PermissionName omits "microphone" although every engine answers it.
-        const status = await navigator.permissions.query({
-          name: "microphone" as PermissionName,
-        });
+        const status = await navigator.permissions.query({ name: "microphone" });
         return status.state;
       } catch {
         return null;

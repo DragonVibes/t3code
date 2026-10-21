@@ -27,7 +27,6 @@ export type EnvironmentVoiceTranscriberDependencies = {
   /** Null when the environment has no reachable HTTP base, such as while disconnected. */
   readonly resolveUrl: (relativeUrl: string) => string | null;
   readonly fetch: typeof globalThis.fetch;
-  /** Re-encodes the recording before upload, such as to the WAV every provider accepts. */
   readonly prepareAudio?: (recording: Blob) => Promise<Blob>;
 };
 
@@ -52,6 +51,24 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+function cancelledError(): VoiceTranscriptionError {
+  return new VoiceTranscriptionError("cancelled", "Voice transcription was cancelled.");
+}
+
+/**
+ * Settles as cancelled on abort even though the work continues. Minting a URL and
+ * decoding audio hold no resource the controller owns, so a stuck RPC must not
+ * block the next recording.
+ */
+function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(cancelledError());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(cancelledError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 async function readJson(response: Response): Promise<unknown> {
   try {
     return await response.json();
@@ -74,11 +91,6 @@ function failureFromResponse(status: number, body: unknown): VoiceTranscriptionE
   );
 }
 
-/**
- * Uploads the recording to the environment, which forwards it to the configured
- * speech-to-text API. The API key never leaves the environment, so the client only
- * needs the capability URL the environment mints per recording.
- */
 export function createEnvironmentVoiceTranscriber(
   dependencies: EnvironmentVoiceTranscriberDependencies,
 ): VoiceTranscriber {
@@ -97,8 +109,9 @@ export function createEnvironmentVoiceTranscriber(
     throwIfVoiceTranscriptionAborted(signal);
     if (dependencies.prepareAudio && blob.size > 0) {
       try {
-        blob = await dependencies.prepareAudio(blob);
+        blob = await abortable(dependencies.prepareAudio(blob), signal);
       } catch (error) {
+        if (error instanceof VoiceTranscriptionError) throw error;
         throw new VoiceTranscriptionError(
           "transcription-failed",
           "Could not convert the recording for upload.",
@@ -127,8 +140,12 @@ export function createEnvironmentVoiceTranscriber(
 
     let minted: VoiceTranscriptionCreateUrlResult;
     try {
-      minted = await dependencies.createTranscriptionUrl({ mimeType, sizeBytes: blob.size });
+      minted = await abortable(
+        dependencies.createTranscriptionUrl({ mimeType, sizeBytes: blob.size }),
+        signal,
+      );
     } catch (error) {
+      if (error instanceof VoiceTranscriptionError) throw error;
       if (isNotConfiguredError(error)) {
         throw new VoiceTranscriptionError(
           "unavailable",

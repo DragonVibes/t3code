@@ -182,8 +182,6 @@ function transcriptionErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message === "voice-operation-busy") {
     return "Voice transcription is still finishing. Try again shortly.";
   }
-  // Transcribers phrase their failures for the user, such as the environment's own
-  // reason for rejecting an upload. Anything else is an unexpected defect.
   if (error instanceof VoiceTranscriptionError) return error.message;
   return "Could not transcribe this recording.";
 }

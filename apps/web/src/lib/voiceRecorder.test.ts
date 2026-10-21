@@ -27,10 +27,17 @@ class FakeMediaRecorder implements MediaRecorderLike {
   }
 
   start(): void {
+    if (this.state !== "inactive") throw new DOMException("already recording", "InvalidStateError");
     this.state = "recording";
   }
 
   stop(): void {
+    if (this.state === "inactive") throw new DOMException("not recording", "InvalidStateError");
+    this.endRecording();
+  }
+
+  /** What the browser does when every track of the stream ends. */
+  endRecording(): void {
     this.state = "inactive";
     for (const listener of this.listeners.get("dataavailable") ?? []) {
       listener({ data: this.chunk } as never);
@@ -74,11 +81,11 @@ function createHarness(overrides: Partial<VoiceRecorderEnvironment> = {}) {
   return { web, environment, tracks, recorders, statuses, created, revoked };
 }
 
-async function startRecording(harness: ReturnType<typeof createHarness>) {
+async function startRecording(harness: ReturnType<typeof createHarness>, forDuration = 300) {
   expect(await harness.web.requestPermission()).toEqual({ granted: true, canAskAgain: true });
   await harness.web.configureRecording();
   await harness.web.recorder.prepareToRecordAsync();
-  harness.web.recorder.record({ forDuration: 300 });
+  harness.web.recorder.record({ forDuration });
 }
 
 function refusal(name: "NotAllowedError" | "SecurityError") {
@@ -86,6 +93,13 @@ function refusal(name: "NotAllowedError" | "SecurityError") {
     throw new DOMException("refused", name);
   };
 }
+
+const finished = (url: string): VoiceRecorderStatus => ({
+  isFinished: true,
+  hasError: false,
+  error: null,
+  url,
+});
 
 describe("createWebVoiceRecorder", () => {
   afterEach(() => {
@@ -104,6 +118,7 @@ describe("createWebVoiceRecorder", () => {
     expect(harness.created[0]?.type).toBe("audio/webm;codecs=opus");
     expect(await harness.created[0]?.text()).toBe("pcm");
     expect(harness.web.startedAt).toBeNull();
+    expect(harness.statuses).toEqual([]);
 
     await harness.web.releaseRecording();
     for (const track of harness.tracks) expect(track.stop).toHaveBeenCalledTimes(1);
@@ -125,15 +140,24 @@ describe("createWebVoiceRecorder", () => {
 
   it("stops itself at the duration limit and reports the finished recording", async () => {
     const harness = createHarness();
-    await startRecording(harness);
+    await harness.web.requestPermission();
+    await harness.web.configureRecording();
+    await harness.web.recorder.prepareToRecordAsync();
     vi.useFakeTimers();
     harness.web.recorder.record({ forDuration: 2 });
     await vi.advanceTimersByTimeAsync(1_999);
     expect(harness.statuses).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
-    expect(harness.statuses).toEqual([
-      { isFinished: true, hasError: false, error: null, url: "blob:recording-1" },
-    ]);
+    expect(harness.statuses).toEqual([finished("blob:recording-1")]);
+  });
+
+  it("hands over what it captured when the microphone ends on its own", async () => {
+    const harness = createHarness();
+    await startRecording(harness);
+    harness.recorders[0]!.endRecording();
+    expect(harness.statuses).toEqual([finished("blob:recording-1")]);
+    await harness.web.recorder.stop();
+    expect(harness.statuses).toHaveLength(1);
   });
 
   it("resolves stop without a recording when nothing started", async () => {
@@ -153,6 +177,22 @@ describe("createWebVoiceRecorder", () => {
     await harness.web.requestPermission();
     await harness.web.releaseRecording();
     for (const track of harness.tracks) expect(track.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops a stream the prompt grants after voice input was already released", async () => {
+    const { stream, tracks } = createFakeStream();
+    let grant!: (stream: MediaStream) => void;
+    const harness = createHarness({
+      getUserMedia: () =>
+        new Promise<MediaStream>((resolve) => {
+          grant = resolve;
+        }),
+    });
+    const permission = harness.web.requestPermission();
+    await harness.web.releaseRecording();
+    grant(stream);
+    expect(await permission).toEqual({ granted: true, canAskAgain: true });
+    for (const track of tracks) expect(track.stop).toHaveBeenCalledTimes(1);
   });
 
   it("tells a blocked microphone apart from a dismissed prompt", async () => {

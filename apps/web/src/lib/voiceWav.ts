@@ -1,4 +1,3 @@
-/** Speech models downsample to 16 kHz mono anyway, so the upload carries nothing more. */
 export const VOICE_WAV_SAMPLE_RATE = 16_000;
 
 const WAV_HEADER_BYTES = 44;
@@ -9,7 +8,6 @@ function writeAscii(view: DataView, offset: number, text: string): void {
   }
 }
 
-/** Canonical 44-byte RIFF header followed by little-endian 16-bit mono PCM. */
 export function encodeWavPcm16(samples: ArrayLike<number>, sampleRate: number): ArrayBuffer {
   const dataBytes = samples.length * 2;
   const buffer = new ArrayBuffer(WAV_HEADER_BYTES + dataBytes);
@@ -38,30 +36,31 @@ export function encodeWavPcm16(samples: ArrayLike<number>, sampleRate: number): 
   return buffer;
 }
 
+export function downmixToMono(audio: AudioBuffer): Float32Array {
+  const mono = new Float32Array(audio.length);
+  for (let channel = 0; channel < audio.numberOfChannels; channel += 1) {
+    const samples = audio.getChannelData(channel);
+    for (let index = 0; index < samples.length; index += 1) {
+      mono[index] = (mono[index] ?? 0) + (samples[index] ?? 0) / audio.numberOfChannels;
+    }
+  }
+  return mono;
+}
+
 /**
- * Every provider gets the same 16 kHz mono WAV. xAI rejects WebM, which is the only
- * container Chromium's MediaRecorder produces, and a local whisper.cpp server would
- * otherwise need ffmpeg to read the browser's upload.
+ * Every provider gets the same 16 kHz mono WAV. xAI rejects WebM, Chromium's default
+ * MediaRecorder container, and a local whisper.cpp server would otherwise need ffmpeg
+ * to read the browser's upload. decodeAudioData resamples to its context's rate, so a
+ * 16 kHz offline context does the conversion itself.
  */
 export async function convertRecordingToWav(recording: Blob): Promise<Blob> {
-  const encoded = await recording.arrayBuffer();
   const decoder = new OfflineAudioContext({
     numberOfChannels: 1,
     length: 1,
     sampleRate: VOICE_WAV_SAMPLE_RATE,
   });
-  const decoded = await decoder.decodeAudioData(encoded);
-  const resampler = new OfflineAudioContext({
-    numberOfChannels: 1,
-    length: Math.max(1, Math.ceil(decoded.duration * VOICE_WAV_SAMPLE_RATE)),
-    sampleRate: VOICE_WAV_SAMPLE_RATE,
-  });
-  const source = resampler.createBufferSource();
-  source.buffer = decoded;
-  source.connect(resampler.destination);
-  source.start();
-  const rendered = await resampler.startRendering();
-  return new Blob([encodeWavPcm16(rendered.getChannelData(0), VOICE_WAV_SAMPLE_RATE)], {
+  const decoded = await decoder.decodeAudioData(await recording.arrayBuffer());
+  return new Blob([encodeWavPcm16(downmixToMono(decoded), VOICE_WAV_SAMPLE_RATE)], {
     type: "audio/wav",
   });
 }

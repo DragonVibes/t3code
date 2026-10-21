@@ -15,7 +15,7 @@ function control(
   overrides: Partial<React.ComponentProps<typeof ComposerVoiceInputControl>> = {},
 ) {
   return (
-    <div className="flex w-80 justify-end">
+    <div className="flex w-80 shrink-0 flex-nowrap items-center justify-end gap-2">
       <ComposerVoiceInputControl
         state={state}
         shortcutLabel="⌘⇧Space"

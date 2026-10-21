@@ -2,7 +2,6 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { convertRecordingToWav, encodeWavPcm16, VOICE_WAV_SAMPLE_RATE } from "./voiceWav";
 
-/** A one-second 440 Hz tone at 48 kHz, as a browser might hand back from a recording. */
 function toneRecording(): Blob {
   const sampleRate = 48_000;
   const samples = Float32Array.from({ length: sampleRate }, (_, index) =>

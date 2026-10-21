@@ -19,6 +19,7 @@ export type VoiceTranscriptionErrorCode =
   | "transcription-failed"
   | "cancelled";
 
+/** `message` is shown to the user as written, so phrase it for them. */
 export class VoiceTranscriptionError extends Error {
   readonly code: VoiceTranscriptionErrorCode;
 

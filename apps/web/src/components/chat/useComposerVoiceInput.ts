@@ -7,6 +7,7 @@ import {
 } from "@t3tools/client-runtime/voice-input";
 import { useEffect, useLayoutEffect, useState } from "react";
 
+import { isCommandPaletteOpen } from "~/commandPaletteBus";
 import { createBrowserVoiceRecorderEnvironment, createWebVoiceRecorder } from "~/lib/voiceRecorder";
 import { createWebVoiceTranscriber } from "~/state/voiceTranscription";
 
@@ -16,7 +17,6 @@ export interface ComposerVoiceInputInput {
   readonly environmentId: EnvironmentId;
   readonly ownerKey: string;
   readonly language: string;
-  /** The controller treats a draft that changed since recording started as stale. */
   readonly draftText: string;
   readonly readDraft: () => Omit<VoiceDraftSnapshot, "revision">;
   readonly commitDraft: (text: string, selection: VoiceDraftSnapshot["selection"]) => void;
@@ -27,7 +27,6 @@ export interface ComposerVoiceInput {
   readonly busy: boolean;
   readonly readStartedAt: () => number | null;
   readonly readLevel: () => number;
-  /** Starts from idle or an error, stops and transcribes while recording. */
   readonly toggle: () => void;
   readonly cancel: () => void;
 }
@@ -35,19 +34,16 @@ export interface ComposerVoiceInput {
 interface VoiceInputRuntime extends Omit<ComposerVoiceInput, "state" | "busy"> {
   readonly setInput: (input: ComposerVoiceInputInput) => void;
   readonly setOwner: (ownerKey: string) => void;
-  readonly noteDraftChanged: (draftText: string) => void;
+  readonly setDraftText: (draftText: string) => void;
   readonly dispose: () => void;
 }
 
-/**
- * Everything the controller reads at event time lives here rather than in React
- * state, so the hook re-renders only when the voice input phase changes.
- */
 function createRuntime(
   initialInput: ComposerVoiceInputInput,
   onStateChange: (state: VoiceInputState) => void,
 ): VoiceInputRuntime {
   let latest = initialInput;
+  let draftText = initialInput.draftText;
   let revision = 0;
   let ownerKey: string | null = null;
   let controller: VoiceInputController | null = null;
@@ -65,7 +61,6 @@ function createRuntime(
     commitDraft: (text, selection) => latest.commitDraft(text, selection),
     onStateChange: (state) => {
       onStateChange(state);
-      // The microphone is on only while voice input is active, whichever path ended it.
       if (!voiceInputBlocksSubmission(state)) void recorder.releaseRecording();
     },
   });
@@ -78,7 +73,9 @@ function createRuntime(
       if (ownerKey !== null && ownerKey !== next) active.ownerChanged();
       ownerKey = next;
     },
-    noteDraftChanged: () => {
+    setDraftText: (next) => {
+      if (next === draftText) return;
+      draftText = next;
       revision += 1;
     },
     dispose: () => {
@@ -105,7 +102,7 @@ export function useComposerVoiceInput(input: ComposerVoiceInputInput): ComposerV
     runtime.setInput(input);
   });
   useEffect(() => {
-    runtime.noteDraftChanged(input.draftText);
+    runtime.setDraftText(input.draftText);
   }, [runtime, input.draftText]);
   useEffect(() => {
     runtime.setOwner(input.ownerKey);
@@ -115,13 +112,21 @@ export function useComposerVoiceInput(input: ComposerVoiceInputInput): ComposerV
   useEffect(() => {
     if (!busy) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented || isCommandPaletteOpen()) return;
+      // A dialog or menu that is open owns its own Escape.
+      if (
+        event.target instanceof Element &&
+        event.target.closest(
+          '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]',
+        )
+      ) {
+        return;
+      }
       event.preventDefault();
-      event.stopPropagation();
       runtime.cancel();
     };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, [busy, runtime]);
 
   return {

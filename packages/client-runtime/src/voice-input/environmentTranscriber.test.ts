@@ -183,6 +183,24 @@ describe("createEnvironmentVoiceTranscriber", () => {
     expect(uploadSettled).toBe(true);
   });
 
+  it("settles as cancelled while a URL mint is still pending", async () => {
+    const controller = new AbortController();
+    let mintSettled = false;
+    const harness = createHarness({
+      createTranscriptionUrl: () =>
+        new Promise(() => {
+          mintSettled = false;
+        }),
+    });
+    const pending = transcribe(harness, controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    const cancelled = await transcriptionError(pending);
+    expect(cancelled.code).toBe("cancelled");
+    expect(mintSettled).toBe(false);
+    expect(harness.posts).toHaveLength(0);
+  });
+
   it.each([
     ["an unsupported container", new Blob(["x"], { type: "audio/flac" })],
     ["an empty recording", new Blob([], { type: "audio/mp4" })],

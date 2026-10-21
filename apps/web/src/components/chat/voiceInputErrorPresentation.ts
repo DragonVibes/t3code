@@ -1,9 +1,7 @@
 import type { VoiceInputState } from "@t3tools/client-runtime/voice-input";
 
 export interface VoiceInputErrorContext {
-  /** getUserMedia exists only on HTTPS and localhost origins. */
   readonly secureContext: boolean;
-  /** True on macOS desktop builds whose bridge can open the Microphone privacy pane. */
   readonly canOpenSystemSettings: boolean;
 }
 

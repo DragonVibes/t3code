@@ -711,7 +711,12 @@ function CommandPaletteDialog(props: {
 }
 
 function toggleComposerDictation(composerHandleRef: ComposerHandleRef | null): void {
-  composerHandleRef?.current?.toggleDictation();
+  if (composerHandleRef?.current?.toggleDictation() === true) return;
+  toastManager.add({
+    type: "warning",
+    title: "Voice input is not available right now",
+    description: "The composer is not accepting text at the moment.",
+  });
 }
 
 function OpenCommandPaletteDialog(props: {

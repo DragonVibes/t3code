@@ -16,8 +16,7 @@ import {
   type VoiceInputErrorContext,
 } from "./voiceInputErrorPresentation";
 
-/** At most 15 meter updates a second, and none outside the recording phase. */
-export const VOICE_METER_INTERVAL_MS = 66;
+const VOICE_METER_INTERVAL_MS = 66;
 const VOICE_METER_BAR_COUNT = 5;
 const VOICE_METER_REST_SCALE = 0.15;
 
@@ -103,7 +102,6 @@ export interface ComposerVoiceInputControlProps {
   readonly shortcutLabel: string | null;
   readonly readStartedAt: () => number | null;
   readonly readLevel: () => number;
-  /** Starts recording, or stops and transcribes. The same button in the same spot does both. */
   readonly onToggle: () => void;
   readonly onCancel: () => void;
   readonly errorContext?: VoiceInputErrorContext;
