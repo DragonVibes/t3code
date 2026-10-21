@@ -291,7 +291,8 @@ const signMacArchiveContents = Effect.fn("signMacArchiveContents")(function* (in
         entry.endsWith(".node") ||
         entry.endsWith(".dylib") ||
         entry.endsWith("spawn-helper") ||
-        entry.endsWith("t3-resource-monitor"),
+        entry.endsWith("t3-resource-monitor") ||
+        entry.endsWith("t3-apple-speech"),
     )
     .map((entry) => path.join(input.contentDir, entry));
 
@@ -438,6 +439,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   readonly version: string;
   readonly outputDir: string;
   readonly resourceMonitorDir: Option.Option<string>;
+  readonly appleSpeechDir: Option.Option<string>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -485,6 +487,24 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   yield* fs.copyFile(builtExecutable, path.join(contentDir, executableName));
   yield* stageWebClient(webClient, path.join(contentDir, "client"));
   yield* fs.copy(resourceMonitorDir, path.join(contentDir, "resource-monitor"));
+  if (input.platform === "mac") {
+    const appleSpeechDir = Option.getOrElse(input.appleSpeechDir, () =>
+      path.join(serverDir, "dist/apple-speech"),
+    );
+    if (Option.isSome(input.appleSpeechDir)) {
+      yield* requireInput(
+        appleSpeechDir,
+        "Build it with `node native/apple-speech/build.mjs --arch <arch> --output <dir>/t3-apple-speech`.",
+      );
+    }
+    if (yield* fs.exists(appleSpeechDir)) {
+      yield* fs.copy(appleSpeechDir, path.join(contentDir, "apple-speech"));
+    } else {
+      yield* Effect.log(
+        `[cli-archive] No Apple speech helper at ${appleSpeechDir}; the archive ships without on-device transcription.`,
+      );
+    }
+  }
   yield* stageRuntimeExternals({
     repoRoot,
     stageDir: contentDir,
@@ -559,6 +579,12 @@ const command = Command.make(
     resourceMonitorDir: Flag.String("resource-monitor-dir").pipe(
       Flag.withDescription(
         "Directory laid out like dist/resource-monitor (defaults to apps/server/dist/resource-monitor).",
+      ),
+      Flag.optional,
+    ),
+    appleSpeechDir: Flag.String("apple-speech-dir").pipe(
+      Flag.withDescription(
+        "Directory holding t3-apple-speech for macOS archives (defaults to apps/server/dist/apple-speech when it exists).",
       ),
       Flag.optional,
     ),

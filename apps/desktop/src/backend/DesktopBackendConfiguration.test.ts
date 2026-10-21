@@ -991,6 +991,42 @@ describe("DesktopBackendConfiguration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("hands the packaged Apple speech helper only to a macOS backend", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-backend-config-test-",
+      });
+      const resourcesPath = path.join(baseDir, "resources");
+      const helperPath = path.join(resourcesPath, "apple-speech/t3-apple-speech");
+      yield* fileSystem.makeDirectory(path.dirname(helperPath), { recursive: true });
+      yield* fileSystem.writeFileString(helperPath, "binary");
+      yield* fileSystem.chmod(helperPath, 0o755);
+
+      const resolveBootstrap = (platform: NodeJS.Platform) =>
+        Effect.gen(function* () {
+          const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+          return (yield* configuration.resolvePrimary).bootstrap;
+        }).pipe(
+          Effect.provide(
+            layerBackendConfiguration().pipe(
+              Layer.provideMerge(layerServerExposure),
+              Layer.provideMerge(DesktopAppSettings.layerTest()),
+              Layer.provideMerge(DesktopWslServerTree.layerTest()),
+              Layer.provideMerge(DesktopWslEnvironment.layerTest()),
+              Layer.provideMerge(
+                layerEnvironment(baseDir, { platform, isPackaged: true, resourcesPath }),
+              ),
+            ),
+          ),
+        );
+
+      assert.equal((yield* resolveBootstrap("darwin")).appleSpeechHelperPath, helperPath);
+      assert.notProperty(yield* resolveBootstrap("linux"), "appleSpeechHelperPath");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it("resolvePrimaryLabel is runSync-safe against the real WSL availability probe", async () => {
     // oxlint-disable-next-line t3code/no-manual-effect-runtime-in-tests -- This test intentionally replicates the sync IPC handler's runSync path to catch a regression to async-only resolution; it.effect would mask it.
     const runtime = ManagedRuntime.make(
