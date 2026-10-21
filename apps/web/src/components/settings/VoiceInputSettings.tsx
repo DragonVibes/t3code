@@ -1,6 +1,9 @@
+import { useAtomValue } from "@effect/atom-react";
 import type { ServerSettingsPatch, VoiceTranscriptionProvider } from "@t3tools/contracts";
 import { XIcon } from "lucide-react";
 
+import { primaryServerKeybindingsAtom } from "~/state/server";
+import { shortcutLabelForCommand } from "../../keybindings";
 import { Button } from "../ui/button";
 import { DraftInput } from "../ui/draft-input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -36,6 +39,8 @@ export function VoiceInputSettings() {
   const settings = useScopedSettings((unified) => unified.voiceTranscription);
   const updateSettings = useUpdateScopedSettings();
   const mixed = useScopedSettingsMixed(SETTING_KEYS);
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const shortcutLabel = shortcutLabelForCommand(keybindings, "composer.toggleDictation");
   const { connectedEnvironments } = useSettingsScope();
   const hasServerTargets = connectedEnvironments.length > 0;
   const appleOnDeviceAvailable =
@@ -63,7 +68,7 @@ export function VoiceInputSettings() {
         serverScoped
         settingKeys={SETTING_KEYS}
         {...searchableSetting("voice-input-enabled")}
-        description="Dictate into the composer with the microphone button or the composer.toggleDictation shortcut. The recording goes to this environment, which transcribes it with the provider below, and the text is inserted for you to review before sending."
+        description={`Dictate into the composer with the microphone button or ${shortcutLabel ? `the ${shortcutLabel} shortcut` : "the Voice input command in the palette"}. The recording goes to this environment, which transcribes it with the provider below, and the text is inserted for you to review before sending.`}
         control={
           hasServerTargets ? (
             <ScopedSwitch
@@ -128,7 +133,7 @@ export function VoiceInputSettings() {
               serverScoped
               settingKeys={SETTING_KEYS}
               {...searchableSetting("voice-input-model")}
-              description="Pick a preset or point Base URL at any OpenAI-compatible endpoint. Local whisper.cpp is a whisper.cpp server on the machine running T3 Code, started with `whisper-server --inference-path /v1/audio/transcriptions -m <model>`; uploads are 16 kHz WAV, so ffmpeg and --convert are not needed. OpenAI retires gpt-4o-mini-transcribe and whisper-1 on 2027-02-26."
+              description="Pick a preset or point Base URL at any OpenAI-compatible endpoint, including a whisper.cpp server on the machine running T3 Code. The voice input section of the user guide covers whisper.cpp setup."
               control={
                 <div className={`flex flex-col gap-2 ${CONTROL_CLASSNAME}`}>
                   <Select

@@ -94,7 +94,7 @@ function originOf(baseUrl: string): string {
   }
 }
 
-export function isHttpVoiceInputProvider(
+function isHttpVoiceInputProvider(
   provider: VoiceTranscriptionProvider,
 ): provider is HttpVoiceTranscriptionProvider {
   return provider !== "apple-on-device";
@@ -116,8 +116,7 @@ export function resolveVoiceInputPreset(target: VoiceInputProviderTarget): Voice
   return match?.id ?? "custom";
 }
 
-/** A key belongs to the host it was issued for, so a new origin starts without one. */
-function withKeyReset(
+function clearKeyOnOriginChange(
   patch: VoiceInputTargetPatch,
   current: Pick<VoiceInputProviderTarget, "baseUrl">,
 ): VoiceInputTargetPatch {
@@ -132,7 +131,7 @@ export function voiceInputPresetPatch(
 ): VoiceInputTargetPatch | null {
   const preset = VOICE_INPUT_PRESETS.find((candidate) => candidate.id === id);
   if (!preset) return null;
-  return withKeyReset({ provider: preset.provider, ...preset.endpoint }, current);
+  return clearKeyOnOriginChange({ provider: preset.provider, ...preset.endpoint }, current);
 }
 
 export function voiceInputProviderPatch(
@@ -140,7 +139,10 @@ export function voiceInputProviderPatch(
   current: Pick<VoiceInputProviderTarget, "baseUrl">,
 ): VoiceInputTargetPatch {
   return isHttpVoiceInputProvider(provider)
-    ? withKeyReset({ provider, ...VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS[provider] }, current)
+    ? clearKeyOnOriginChange(
+        { provider, ...VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS[provider] },
+        current,
+      )
     : { provider };
 }
 
