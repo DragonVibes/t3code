@@ -309,13 +309,10 @@ export const openSystemSettings = DesktopIpc.makeIpcMethod({
     if (environment.platform !== "darwin") return false;
     const owner = Electron.BrowserWindow.getFocusedWindow();
     const opened = yield* shell.openSystemSettings(pane);
-    if (opened && environment.isPackaged) {
+    // The helper explains dragging T3 Code into the list; the microphone pane has no add button.
+    if (opened && environment.isPackaged && pane === "full-disk-access") {
       const permissions = yield* MacPermissions.MacPermissions;
-      const isGranted =
-        pane === "full-disk-access"
-          ? yield* safariPermissionCheck
-          : () => Electron.systemPreferences.getMediaAccessStatus("microphone") === "granted";
-      yield* permissions.showHelper(pane, owner, isGranted);
+      yield* permissions.showHelper(pane, owner, yield* safariPermissionCheck);
     }
     return opened;
   }),
