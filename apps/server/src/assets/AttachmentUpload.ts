@@ -64,7 +64,8 @@ function decodeClaims(encodedPayload: string): AttachmentUploadClaims | null {
   }
 }
 
-const loadSigningSecret = Effect.gen(function* () {
+/** Shared with voice transcription upload tokens; each token's `kind` keeps the two apart. */
+export const loadUploadSigningSecret = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   return yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32);
 });
@@ -72,7 +73,7 @@ const loadSigningSecret = Effect.gen(function* () {
 export const issueAttachmentUploadUrl = Effect.fn("AttachmentUpload.issueUrl")(function* (
   input: AttachmentCreateUploadUrlInput,
 ) {
-  const secret = yield* loadSigningSecret.pipe(
+  const secret = yield* loadUploadSigningSecret.pipe(
     Effect.mapError((cause) => new AttachmentUploadSigningKeyError({ cause })),
   );
   const config = yield* ServerConfig.ServerConfig;
@@ -125,7 +126,7 @@ export const validateAttachmentUploadToken = Effect.fn("AttachmentUpload.validat
     return null;
   }
 
-  const secret = yield* loadSigningSecret.pipe(
+  const secret = yield* loadUploadSigningSecret.pipe(
     Effect.tapError((cause) =>
       Effect.logError("Failed to load the attachment upload signing key.", { cause }),
     ),
