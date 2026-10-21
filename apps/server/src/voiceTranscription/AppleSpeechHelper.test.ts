@@ -184,17 +184,14 @@ describe("AppleSpeechHelper", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("stops retrying a probe that keeps timing out", () =>
+  it.effect("gives up on a probe that keeps timing out after five tries", () =>
     Effect.gen(function* () {
       const { service, runs } = yield* setup(macOS26, () =>
         Effect.succeed(output({ code: null, timedOut: true })),
       );
       expect(yield* service.availability).toBe("unavailable");
-      yield* TestClock.adjust("1 hour");
-      const attempts = runs.length;
-      expect(attempts).toBeGreaterThan(1);
-      yield* TestClock.adjust("1 hour");
-      expect(runs).toHaveLength(attempts);
+      yield* TestClock.adjust("1 day");
+      expect(runs).toHaveLength(5);
       expect(yield* service.available).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

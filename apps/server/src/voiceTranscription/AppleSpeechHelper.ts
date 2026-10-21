@@ -21,7 +21,7 @@ const HELPER_NAME = "t3-apple-speech";
 const MIN_DARWIN_MAJOR = 25;
 const PROBE_TIMEOUT = "10 seconds";
 const PROBE_RETRY_DELAY = Duration.minutes(1);
-const PROBE_RETRY_LIMIT = 5;
+const PROBE_ATTEMPTS = 5;
 // The first transcription in a language downloads its model through AssetInventory.
 const TRANSCRIBE_TIMEOUT_SECONDS = 120;
 const CAUSE_MAX_LENGTH = 300;
@@ -183,7 +183,7 @@ export const make = Effect.gen(function* () {
     Effect.flatMap(Option.match({ onNone: () => Effect.succeedNone, onSome: probe })),
     Effect.flatMap((found) => SubscriptionRef.set(helperPath, found)),
     Effect.ensuring(Deferred.succeed(firstProbeAnswered, undefined)),
-    Effect.retry({ schedule: Schedule.spaced(PROBE_RETRY_DELAY), times: PROBE_RETRY_LIMIT }),
+    Effect.retry({ schedule: Schedule.spaced(PROBE_RETRY_DELAY), times: PROBE_ATTEMPTS - 1 }),
     Effect.ignore({ log: true }),
   );
   if (hostSupported) {
