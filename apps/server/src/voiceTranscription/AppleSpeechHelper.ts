@@ -98,7 +98,6 @@ export class AppleSpeechHelper extends Context.Service<
   {
     /** The latest probe answer without waiting, false until one arrives; descriptor reads use it. */
     readonly available: Effect.Effect<boolean>;
-    /** `available` now, then each time a probe answer changes it. */
     readonly streamAvailableChanges: Stream.Stream<boolean>;
     /** Waits for the first probe to answer. */
     readonly availability: Effect.Effect<AppleSpeechAvailability>;

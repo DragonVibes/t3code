@@ -46,7 +46,6 @@ const decodeResult = Schema.decodeUnknownOption(VoiceTranscriptionResult);
 const decodeFailure = Schema.decodeUnknownOption(VoiceTranscriptionFailure);
 const decodeNotConfigured = Schema.decodeUnknownOption(VoiceTranscriptionNotConfiguredError);
 
-/** Whether sending the same recording again can succeed without a settings change. */
 const RETRYABLE_FAILURES: Record<VoiceTranscriptionFailureCode, boolean> = {
   not_configured: false,
   invalid_upload: false,

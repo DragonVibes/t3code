@@ -55,7 +55,6 @@ export class VoiceInputSession {
   ) {
     this.controller = new VoiceInputController({
       ...dependencies,
-      // `retry()` records anew, so a kept recording could never be sent again.
       retainFailedRecordings: false,
       onStateChange: (state) => {
         if (!voiceInputBlocksSubmission(state)) {

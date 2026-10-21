@@ -65,7 +65,6 @@ export type VoiceInputControllerDependencies = {
   readonly configureRecording: () => Promise<void>;
   readonly releaseRecording: () => Promise<void>;
   readonly deleteRecording: (uri: string) => void;
-  /** Keep a recording whose transcription failed for `retryTranscription()`, instead of deleting it. */
   readonly retainFailedRecordings: boolean;
   readonly readDraft: () => VoiceDraftSnapshot | null;
   /** False when the draft refused the text, which the controller reports as a changed draft. */
@@ -551,7 +550,6 @@ export class VoiceInputController {
     this.setState(IDLE_STATE);
   }
 
-  /** Unheld audio is deleted when the operation releases its resources. */
   private failTranscription(uri: string, error: unknown, message: string): void {
     const retryable = isRetryable(error);
     if (retryable && this.dependencies.retainFailedRecordings) {
