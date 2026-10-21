@@ -61,8 +61,27 @@ class FakeMediaRecorder implements MediaRecorderLike {
 
 const prepared: PreparedVoiceTranscription = { locale: "en-US", transcribe: async () => "spoken" };
 
+type Commit = { text: string; selection: { start: number; end: number } };
+
+interface VoiceProbe {
+  readonly onVoice: (voice: ComposerVoiceInput) => void;
+  readonly onCommit: (commit: Commit) => void;
+}
+
 function setup(prepare: VoiceTranscriber["prepare"] = async () => prepared) {
-  commits = [];
+  const commits: Array<Commit> = [];
+  let latest: ComposerVoiceInput | null = null;
+  const probe: VoiceProbe = {
+    onVoice: (next) => {
+      latest = next;
+    },
+    onCommit: (commit) => commits.push(commit),
+  };
+  const voice = () => {
+    if (!latest) throw new Error("The voice input host has not rendered.");
+    return latest;
+  };
+  const page = (ownerKey = "thread-1") => <Page ownerKey={ownerKey} {...probe} />;
   const tracks = [{ stop: vi.fn() }];
   const stream = { getTracks: () => tracks } as unknown as MediaStream;
   const pendingStarts: Array<() => void> = [];
@@ -86,17 +105,15 @@ function setup(prepare: VoiceTranscriber["prepare"] = async () => prepared) {
   const startRecording = async () => {
     const started = armStart();
     await act(async () => {
-      voice.toggle();
+      voice().toggle();
       await started;
     });
-    expect(voice.state.phase).toBe("recording");
+    expect(voice().state.phase).toBe("recording");
   };
-  return { tracks, prepare: prepareSpy, armStart, startRecording };
+  return { tracks, prepare: prepareSpy, armStart, startRecording, voice, commits, page };
 }
 
-let voice!: ComposerVoiceInput;
-let commits: Array<{ text: string; selection: { start: number; end: number } }> = [];
-function Host({ ownerKey }: { ownerKey: string }) {
+function Host({ ownerKey, onVoice, onCommit }: { ownerKey: string } & VoiceProbe) {
   const rootRef = useRef<HTMLDivElement>(null);
   const next = useComposerVoiceInput({
     environmentId: EnvironmentId.make("environment"),
@@ -106,13 +123,13 @@ function Host({ ownerKey }: { ownerKey: string }) {
     composerRef: rootRef,
     readDraft: () => ({ ownerKey, text: "hello", selection: { start: 5, end: 5 } }),
     commitDraft: (text, selection) => {
-      commits.push({ text, selection });
+      onCommit({ text, selection });
       return true;
     },
   });
   useEffect(() => {
-    voice = next;
-  }, [next]);
+    onVoice(next);
+  }, [next, onVoice]);
   return (
     <div ref={rootRef}>
       <div contentEditable suppressContentEditableWarning aria-label="Composer editor" />
@@ -120,10 +137,10 @@ function Host({ ownerKey }: { ownerKey: string }) {
   );
 }
 
-function Page({ ownerKey = "thread-1" }: { ownerKey?: string }) {
+function Page({ ownerKey, ...probe }: { ownerKey: string } & VoiceProbe) {
   return (
     <>
-      <Host ownerKey={ownerKey} />
+      <Host ownerKey={ownerKey} {...probe} />
       <input aria-label="Sidebar search" />
       <div role="dialog" aria-label="Preferences">
         <button type="button">Close</button>
@@ -142,37 +159,37 @@ function pressEscape(target: Element) {
 
 describe("useComposerVoiceInput", () => {
   it("leaves Escape to an open dialog or another editable and cancels from the composer", async () => {
-    const { tracks, startRecording } = setup();
-    await using screen = await render(<Page />);
+    const { tracks, startRecording, voice, page } = setup();
+    await using screen = await render(page());
     await startRecording();
 
     await pressEscape(screen.getByRole("button", { name: "Close" }).element());
-    expect(voice.state.phase).toBe("recording");
+    expect(voice().state.phase).toBe("recording");
     await pressEscape(screen.getByRole("textbox", { name: "Sidebar search" }).element());
-    expect(voice.state.phase).toBe("recording");
+    expect(voice().state.phase).toBe("recording");
     expect(tracks[0]!.stop).not.toHaveBeenCalled();
 
     await pressEscape(screen.container.querySelector('[aria-label="Composer editor"]')!);
-    expect(voice.state.phase).toBe("idle");
+    expect(voice().state.phase).toBe("idle");
     expect(tracks[0]!.stop).toHaveBeenCalledTimes(1);
   });
 
   it("cancels the recording when the composer's owner changes", async () => {
-    const { tracks, startRecording } = setup();
-    await using screen = await render(<Page ownerKey="thread-1" />);
+    const { tracks, startRecording, voice, page } = setup();
+    await using screen = await render(page("thread-1"));
     await startRecording();
 
-    await screen.rerender(<Page ownerKey="thread-2" />);
-    expect(voice.state.phase).toBe("idle");
+    await screen.rerender(page("thread-2"));
+    expect(voice().state.phase).toBe("idle");
     expect(tracks[0]!.stop).toHaveBeenCalledTimes(1);
   });
 
   it("releases the microphone on cancel and on unmount", async () => {
-    const { tracks, startRecording } = setup();
-    await using screen = await render(<Page />);
+    const { tracks, startRecording, voice, page } = setup();
+    await using screen = await render(page());
     await startRecording();
-    await act(async () => voice.cancel());
-    expect(voice.state.phase).toBe("idle");
+    await act(async () => voice().cancel());
+    expect(voice().state.phase).toBe("idle");
     expect(tracks[0]!.stop).toHaveBeenCalledTimes(1);
 
     await startRecording();
@@ -181,37 +198,37 @@ describe("useComposerVoiceInput", () => {
   });
 
   it("inserts the transcript at the captured selection and announces each step", async () => {
-    const { startRecording } = setup();
-    await using _screen = await render(<Page />);
-    expect(voice.announcement).toBe("");
+    const { startRecording, voice, commits, page } = setup();
+    await using _screen = await render(page());
+    expect(voice().announcement).toBe("");
     await startRecording();
-    expect(voice.announcement).toBe("Recording.");
+    expect(voice().announcement).toBe("Recording.");
 
-    await act(async () => voice.toggle());
-    expect(voice.state.phase).toBe("idle");
+    await act(async () => voice().toggle());
+    expect(voice().state.phase).toBe("idle");
     expect(commits).toEqual([{ text: "hello spoken", selection: { start: 12, end: 12 } }]);
-    expect(voice.announcement).toBe("Transcript inserted.");
+    expect(voice().announcement).toBe("Transcript inserted.");
   });
 
   it("ignores toggle while voice input is still starting", async () => {
     const preparation = deferred<PreparedVoiceTranscription>();
-    const { prepare, armStart } = setup(() => preparation.promise);
-    await using screen = await render(<Page />);
+    const { prepare, armStart, voice, page } = setup(() => preparation.promise);
+    await using screen = await render(page());
     const started = armStart();
-    await act(async () => voice.toggle());
-    expect(voice.state.phase).toBe("preparing");
-    expect(voice.busy).toBe(true);
+    await act(async () => voice().toggle());
+    expect(voice().state.phase).toBe("preparing");
+    expect(voice().busy).toBe(true);
     expect(prepare).toHaveBeenCalledTimes(1);
 
-    await act(async () => voice.toggle());
-    expect(voice.state.phase).toBe("preparing");
+    await act(async () => voice().toggle());
+    expect(voice().state.phase).toBe("preparing");
     expect(prepare).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       preparation.resolve(prepared);
       await started;
     });
-    expect(voice.state.phase).toBe("recording");
+    expect(voice().state.phase).toBe("recording");
     await screen.unmount();
   });
 });
