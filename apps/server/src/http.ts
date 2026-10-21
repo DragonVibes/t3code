@@ -565,6 +565,12 @@ export const layerVoiceTranscriptionRoute = HttpRouter.add(
           Effect.logWarning("Voice transcription failed upstream.", { cause: error }).pipe(
             Effect.as(voiceTranscriptionFailure("upstream_failed", error.message)),
           ),
+        AppleSpeechUnsupportedLocaleError: (error) =>
+          Effect.succeed(voiceTranscriptionFailure("not_configured", error.message)),
+        AppleSpeechHelperError: (error) =>
+          Effect.logWarning("Voice transcription failed in the Apple speech helper.", {
+            cause: error,
+          }).pipe(Effect.as(voiceTranscriptionFailure("upstream_failed", error.message))),
       }),
     );
   }),

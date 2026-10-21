@@ -18,11 +18,13 @@ import {
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import * as ServerConfig from "../config.ts";
+import * as AppleSpeechHelper from "../voiceTranscription/AppleSpeechHelper.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 
 const layerServerEnvironment = (baseDir: string) =>
   ServerEnvironment.layer.pipe(
     Layer.provide(ServerSecretStore.layer),
+    Layer.provide(AppleSpeechHelper.layerUnavailable),
     Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
 
@@ -98,6 +100,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
           Effect.provide(
             ServerEnvironment.layer.pipe(
               Layer.provide(layerEmptySecretStore),
+              Layer.provide(AppleSpeechHelper.layerUnavailable),
               Layer.provide(ServerConfig.layer({ ...config, mode })),
             ),
           ),
@@ -235,7 +238,10 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         prefix: "t3-server-environment-publish-test-",
       });
       const layerTest = Layer.mergeAll(
-        ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer)),
+        ServerEnvironment.layer.pipe(
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provide(AppleSpeechHelper.layerUnavailable),
+        ),
         ServerSecretStore.layer,
       ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)));
 

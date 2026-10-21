@@ -93,6 +93,7 @@ import * as ProviderAdapterRegistry from "./orchestration-v2/ProviderAdapterRegi
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as ProviderUsageLimitsIngestion from "./provider/ProviderUsageLimitsIngestion.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+import * as AppleSpeechHelper from "./voiceTranscription/AppleSpeechHelper.ts";
 import * as VoiceTranscription from "./voiceTranscription/VoiceTranscription.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
@@ -281,6 +282,7 @@ const layerUsage = UsageService.layer.pipe(
 const layerVoiceTranscription = VoiceTranscription.layer.pipe(
   Layer.provide(layerServerSettings),
   Layer.provide(ServerSecretStore.layer),
+  Layer.provide(AppleSpeechHelper.layer),
 );
 
 const layerResourceDiagnostics = Layer.mergeAll(
@@ -462,7 +464,10 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
   Layer.provide(T3ProjectFileLoader.layer),
 );
 
-const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
+const layerServerEnvironment = ServerEnvironment.layer.pipe(
+  Layer.provide(ServerSecretStore.layer),
+  Layer.provide(AppleSpeechHelper.layer),
+);
 
 const layerAuth = EnvironmentAuth.layer.pipe(
   Layer.provideMerge(layerPersistence),
@@ -1060,7 +1065,12 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(layerRuntimeServices),
       Layer.provideMerge(
         McpSessionRegistry.layer.pipe(
-          Layer.provide(ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+          Layer.provide(
+            ServerEnvironment.layer.pipe(
+              Layer.provide(ServerSecretStore.layer),
+              Layer.provide(AppleSpeechHelper.layer),
+            ),
+          ),
         ),
       ),
       Layer.provide(layerActivation),

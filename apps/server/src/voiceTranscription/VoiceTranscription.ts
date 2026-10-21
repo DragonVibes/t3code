@@ -28,6 +28,7 @@ import {
   timingSafeEqualBase64Url,
 } from "../auth/utils.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as AppleSpeechHelper from "./AppleSpeechHelper.ts";
 
 export const VOICE_TRANSCRIPTION_ROUTE_PREFIX = "/api/voice/transcriptions";
 
@@ -49,17 +50,30 @@ interface TranscriptionFormInput {
   readonly fileName: string;
 }
 
-interface ProviderProtocol {
+interface ProviderBackendBase {
   readonly name: string;
-  readonly path: string;
   readonly acceptedMimeTypes: ReadonlyArray<VoiceTranscriptionAudioMimeType>;
+}
+
+interface HttpProviderBackend extends ProviderBackendBase {
+  readonly kind: "http";
+  readonly path: string;
+  readonly hostedBaseUrl: string;
   readonly form: (input: TranscriptionFormInput) => FormData;
 }
 
-const PROVIDER_PROTOCOLS = {
+interface AppleProviderBackend extends ProviderBackendBase {
+  readonly kind: "apple";
+}
+
+type ProviderBackend = HttpProviderBackend | AppleProviderBackend;
+
+const PROVIDER_BACKENDS = {
   "openai-compatible": {
+    kind: "http",
     name: "OpenAI",
     path: "audio/transcriptions",
+    hostedBaseUrl: VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS["openai-compatible"].baseUrl,
     acceptedMimeTypes: VoiceTranscriptionAudioMimeType.literals,
     form: ({ model, language, file, fileName }) => {
       const form = new FormData();
@@ -74,8 +88,10 @@ const PROVIDER_PROTOCOLS = {
     },
   },
   xai: {
+    kind: "http",
     name: "xAI",
     path: "stt",
+    hostedBaseUrl: VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS.xai.baseUrl,
     acceptedMimeTypes: ["audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav"],
     form: ({ model, language, file, fileName }) => {
       const form = new FormData();
@@ -86,7 +102,12 @@ const PROVIDER_PROTOCOLS = {
       return form;
     },
   },
-} as const satisfies Record<VoiceTranscriptionProvider, ProviderProtocol>;
+  "apple-on-device": {
+    kind: "apple",
+    name: "Apple on-device transcription",
+    acceptedMimeTypes: ["audio/wav"],
+  },
+} as const satisfies Record<VoiceTranscriptionProvider, ProviderBackend>;
 
 const VoiceTranscriptionClaims = Schema.Struct({
   version: Schema.Literal(1),
@@ -203,55 +224,65 @@ export class VoiceTranscription extends Context.Service<
       | VoiceTranscriptionUnsupportedFormatError
       | VoiceTranscriptionCredentialsRejectedError
       | VoiceTranscriptionUpstreamError
+      | AppleSpeechHelper.AppleSpeechHelperError
+      | AppleSpeechHelper.AppleSpeechUnsupportedLocaleError
     >;
   }
 >()("t3/voiceTranscription/VoiceTranscription") {}
 
-interface TranscriptionEndpoint {
-  readonly protocol: ProviderProtocol;
+type HttpTranscriptionEndpoint = HttpProviderBackend & {
   readonly url: string;
   readonly host: string;
   readonly model: string;
   readonly language: string;
   readonly apiKey: string;
-}
+};
 
-function resolveEndpoint(
+type TranscriptionEndpoint =
+  | HttpTranscriptionEndpoint
+  | (AppleProviderBackend & { readonly language: string });
+
+const resolveEndpoint = Effect.fn("VoiceTranscription.resolveEndpoint")(function* (
   settings: VoiceTranscriptionSettings,
-): Effect.Effect<TranscriptionEndpoint, VoiceTranscriptionNotConfiguredError> {
-  const notConfigured = (message: string) =>
-    Effect.fail(new VoiceTranscriptionNotConfiguredError({ message }));
+  appleSpeechAvailable: Effect.Effect<boolean>,
+): Effect.fn.Return<TranscriptionEndpoint, VoiceTranscriptionNotConfiguredError> {
+  const notConfigured = (message: string) => new VoiceTranscriptionNotConfiguredError({ message });
   if (!settings.enabled) {
-    return notConfigured("Voice transcription is turned off for this environment.");
+    return yield* notConfigured("Voice transcription is turned off for this environment.");
+  }
+  const backend = PROVIDER_BACKENDS[settings.provider];
+  if (backend.kind === "apple") {
+    if (!(yield* appleSpeechAvailable)) {
+      return yield* notConfigured(
+        "Apple on-device transcription needs macOS 26 or later on the machine running T3 Code.",
+      );
+    }
+    return { ...backend, language: settings.language };
   }
   const baseUrl = settings.baseUrl.replace(/\/+$/, "");
-  if (!baseUrl) return notConfigured("Voice transcription needs an endpoint URL.");
-  if (!settings.model) return notConfigured("Voice transcription needs a model name.");
-  const protocol = PROVIDER_PROTOCOLS[settings.provider];
+  if (!baseUrl) return yield* notConfigured("Voice transcription needs an endpoint URL.");
+  if (!settings.model) return yield* notConfigured("Voice transcription needs a model name.");
   // Local whisper.cpp-style servers take no key, but the hosted defaults always do.
-  if (
-    !settings.apiKey &&
-    baseUrl === VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS[settings.provider].baseUrl
-  ) {
-    return notConfigured(`Add an ${protocol.name} API key to use voice transcription.`);
+  if (!settings.apiKey && baseUrl === backend.hostedBaseUrl) {
+    return yield* notConfigured(`Add an ${backend.name} API key to use voice transcription.`);
   }
-  const url = URL.parse(`${baseUrl}/${protocol.path}`);
+  const url = URL.parse(`${baseUrl}/${backend.path}`);
   if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) {
-    return notConfigured("The voice transcription endpoint URL is not valid.");
+    return yield* notConfigured("The voice transcription endpoint URL is not valid.");
   }
-  return Effect.succeed({
-    protocol,
+  return {
+    ...backend,
     url: url.toString(),
     host: url.host,
     model: settings.model,
     language: settings.language,
     apiKey: settings.apiKey,
-  });
-}
+  };
+});
 
 const readUpstreamMessage = (
   response: HttpClientResponse.HttpClientResponse,
-  endpoint: TranscriptionEndpoint,
+  endpoint: HttpTranscriptionEndpoint,
 ) =>
   response.text.pipe(
     Effect.map((body) =>
@@ -270,6 +301,7 @@ const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const client = yield* HttpClient.HttpClient;
+  const appleSpeech = yield* AppleSpeechHelper.AppleSpeechHelper;
 
   const signingSecret = loadUploadSigningSecret.pipe(
     Effect.provideService(ServerSecretStore.ServerSecretStore, secretStore),
@@ -285,16 +317,18 @@ const make = Effect.gen(function* () {
           message: "Could not read the voice transcription settings.",
         }),
     ),
-    Effect.flatMap((settings) => resolveEndpoint(settings.voiceTranscription)),
+    Effect.flatMap((settings) =>
+      resolveEndpoint(settings.voiceTranscription, appleSpeech.available),
+    ),
   );
 
   const createUploadUrl = Effect.fn("VoiceTranscription.createUploadUrl")(function* (
     input: VoiceTranscriptionCreateUrlInput,
   ) {
     const endpoint = yield* loadEndpoint;
-    if (!endpoint.protocol.acceptedMimeTypes.includes(input.mimeType)) {
+    if (!endpoint.acceptedMimeTypes.includes(input.mimeType)) {
       return yield* new VoiceTranscriptionNotConfiguredError({
-        message: unsupportedFormatMessage(endpoint.protocol.name, input.mimeType),
+        message: unsupportedFormatMessage(endpoint.name, input.mimeType),
       });
     }
     const secret = yield* signingSecret.pipe(
@@ -355,11 +389,15 @@ const make = Effect.gen(function* () {
     }
     const endpoint = yield* loadEndpoint;
     // The provider can change between minting and uploading.
-    if (!endpoint.protocol.acceptedMimeTypes.includes(claims.mimeType)) {
+    if (!endpoint.acceptedMimeTypes.includes(claims.mimeType)) {
       return yield* new VoiceTranscriptionUnsupportedFormatError({
-        providerName: endpoint.protocol.name,
+        providerName: endpoint.name,
         mimeType: claims.mimeType,
       });
+    }
+    if (endpoint.kind === "apple") {
+      const { text } = yield* appleSpeech.transcribe({ audio, locale: endpoint.language });
+      return { text } satisfies VoiceTranscriptionResult;
     }
     const upstreamError = (
       fields: Omit<ConstructorParameters<typeof VoiceTranscriptionUpstreamError>[0], "host">,
@@ -367,7 +405,7 @@ const make = Effect.gen(function* () {
 
     const request = HttpClientRequest.post(endpoint.url).pipe(
       HttpClientRequest.bodyFormData(
-        endpoint.protocol.form({
+        endpoint.form({
           model: endpoint.model,
           language: endpoint.language,
           file: new Blob([audio], { type: claims.mimeType }),

@@ -21,6 +21,7 @@ import { resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as AppleSpeechHelper from "../voiceTranscription/AppleSpeechHelper.ts";
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
 import { detectServerEnvironmentMachineKind } from "./ServerEnvironmentMachine.ts";
 
@@ -185,6 +186,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const appleSpeech = yield* AppleSpeechHelper.AppleSpeechHelper;
   const identity = yield* ServerEnvironmentIdentity;
   const hostPlatform = yield* HostProcess.Platform;
   const hostArchitecture = yield* HostProcess.Architecture;
@@ -269,17 +271,20 @@ export const make = Effect.gen(function* () {
     },
   };
 
+  // The publish opt-in and relay link change at runtime (`t3 connect
+  // publish`, the client settings toggle), so the capability is read per
+  // descriptor request rather than baked in at startup.
+  const runtimeCapabilities = Effect.all({
+    agentActivityPublishing: readAgentActivityPublishingActive(secrets),
+    appleOnDeviceTranscription: appleSpeech.available,
+  });
+
   return ServerEnvironment.of({
     getEnvironmentId: Effect.succeed(environmentId),
-    // The publish opt-in and relay link change at runtime (`t3 connect
-    // publish`, the client settings toggle), so the capability is read per
-    // descriptor request rather than baked in at startup.
-    getDescriptor: readAgentActivityPublishingActive(secrets).pipe(
-      Effect.map((agentActivityPublishing) => ({
-        ...descriptor,
-        capabilities: { ...descriptor.capabilities, agentActivityPublishing },
-      })),
-    ),
+    getDescriptor: Effect.map(runtimeCapabilities, (capabilities) => ({
+      ...descriptor,
+      capabilities: { ...descriptor.capabilities, ...capabilities },
+    })),
   });
 });
 

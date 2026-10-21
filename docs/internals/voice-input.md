@@ -2,8 +2,22 @@
 
 Transcription edits a composer draft. It does not submit an agent turn. Audio is
 temporary client input, and only normal message submission sends the resulting
-text. The current implementation transcribes locally on supported iOS devices;
-environment-backed transcription is not implemented.
+text. Supported iOS devices transcribe locally. Other clients upload the
+recording to the environment, whose
+[`VoiceTranscription`](../../apps/server/src/voiceTranscription/VoiceTranscription.ts)
+service picks the provider.
+
+Apple on-device transcription runs on the environment host, not on the client.
+A browser cannot reach SpeechAnalyzer, and a remote web or mobile client
+connected to a Mac should get the same provider the desktop app gets. The server
+spawns [`t3-apple-speech`](../../native/apple-speech/main.swift) through
+[`AppleSpeechHelper`](../../apps/server/src/voiceTranscription/AppleSpeechHelper.ts),
+which probes the helper once per process and advertises
+`capabilities.appleOnDeviceTranscription` only on macOS 26 or later with a
+working helper. That capability is the client's signal to offer the provider.
+The server also refuses to mint an upload URL for it when the capability is
+absent, so a client that skips the check, or settings copied to a Linux host,
+fail with a clear message instead of a missing binary.
 
 The [shared controller](../../packages/client-runtime/src/voice-input/controller.ts)
 owns the operation while the client supplies capture and transcription. Preparation

@@ -24,14 +24,25 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerHttp from "../http.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as AppleSpeechHelper from "./AppleSpeechHelper.ts";
 import * as VoiceTranscription from "./VoiceTranscription.ts";
 
 const audio = new Uint8Array([1, 2, 3, 4, 5, 6]);
+
+const appleSpeechUnavailable = AppleSpeechHelper.AppleSpeechHelper.of({
+  available: Effect.succeed(false),
+  transcribe: () => Effect.die("the Apple speech helper is unavailable"),
+});
+
+const appleSpeechAvailable = (
+  transcribe: AppleSpeechHelper.AppleSpeechHelper["Service"]["transcribe"],
+) => AppleSpeechHelper.AppleSpeechHelper.of({ available: Effect.succeed(true), transcribe });
 
 function setup(
   settings: Partial<VoiceTranscriptionSettings>,
   upstream: (request: HttpClientRequest.HttpClientRequest) => Effect.Effect<Response> = () =>
     Effect.succeed(Response.json({ text: "hello world" })),
+  appleSpeech = appleSpeechUnavailable,
 ) {
   const requests: Array<HttpClientRequest.HttpClientRequest> = [];
   const client = HttpClient.make((request) =>
@@ -47,6 +58,7 @@ function setup(
       }),
     ),
     Layer.provide(Layer.succeed(HttpClient.HttpClient, client)),
+    Layer.provide(Layer.succeed(AppleSpeechHelper.AppleSpeechHelper, appleSpeech)),
     Layer.provideMerge(ServerSecretStore.layer),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-voice-test-" })),
     Layer.provideMerge(NodeServices.layer),
@@ -66,6 +78,8 @@ const xai = {
   baseUrl: "https://api.x.ai/v1",
   model: "grok-voice-transcribe-2.0",
 } as const;
+
+const apple = { provider: "apple-on-device", baseUrl: "", model: "", apiKey: "" } as const;
 
 const post = (
   relativeUrl: string,
@@ -168,6 +182,7 @@ describe("VoiceTranscription", () => {
     { settings: { apiKey: "" }, message: "OpenAI API key" },
     { settings: { ...xai, apiKey: "" }, message: "xAI API key" },
     { settings: xai, message: "xAI does not accept audio/webm recordings." },
+    { settings: apple, message: "Apple on-device transcription needs macOS 26 or later" },
     { settings: { model: "" }, message: "model name" },
     { settings: { baseUrl: "" }, message: "endpoint URL" },
     { settings: { baseUrl: "ftp://whisper.local" }, message: "not valid" },
@@ -260,6 +275,68 @@ describe("VoiceTranscription", () => {
       }).pipe(Effect.provide(layer));
     },
   );
+
+  it.effect("mints WAV but not WebM for Apple on-device without a key, URL, or model", () => {
+    const { layer } = setup(
+      apple,
+      undefined,
+      appleSpeechAvailable(() => Effect.die("unused")),
+    );
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(mint);
+      expect(error.message).toBe(
+        "Apple on-device transcription does not accept audio/webm recordings.",
+      );
+      const issued = yield* mintAs("audio/wav");
+      expect(issued.relativeUrl.startsWith("/api/voice/transcriptions/")).toBe(true);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("transcribes WAV through the Apple speech helper without an HTTP request", () => {
+    const transcribed: Array<{ readonly audio: Uint8Array; readonly locale: string }> = [];
+    const { layer, requests } = setup(
+      { ...apple, language: "en" },
+      undefined,
+      appleSpeechAvailable((input) => {
+        transcribed.push(input);
+        return Effect.succeed({ text: "hello apple", locale: "en_US" });
+      }),
+    );
+    return Effect.gen(function* () {
+      const response = yield* post((yield* mintAs("audio/wav")).relativeUrl);
+      expect(response).toEqual({ status: 200, body: { text: "hello apple" } });
+      expect(requests).toHaveLength(0);
+      expect(transcribed).toEqual([{ audio, locale: "en" }]);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect.each([
+    {
+      failure: new AppleSpeechHelper.AppleSpeechUnsupportedLocaleError({ locale: "xx-YY" }),
+      status: 409,
+      code: "not_configured",
+      message: "Apple on-device transcription does not support the language 'xx-YY'.",
+    },
+    {
+      failure: new AppleSpeechHelper.AppleSpeechHelperError({ reason: "assets_failed" }),
+      status: 502,
+      code: "upstream_failed",
+      message: "The Apple speech language model could not be downloaded.",
+    },
+  ])("answers $code when the Apple speech helper fails with $failure._tag", (expected) => {
+    const { layer } = setup(
+      apple,
+      undefined,
+      appleSpeechAvailable(() => expected.failure),
+    );
+    return Effect.gen(function* () {
+      const response = yield* post((yield* mintAs("audio/wav")).relativeUrl);
+      expect(response).toEqual({
+        status: expected.status,
+        body: { code: expected.code, message: expected.message },
+      });
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect("refuses a WebM upload minted before switching to xAI without calling upstream", () => {
     const { layer, requests } = setup({});
