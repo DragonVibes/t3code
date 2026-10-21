@@ -81,6 +81,12 @@ describe("RPC authorization scopes", () => {
     );
   });
 
+  it("requires operate access to spend the environment's transcription credentials", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.voiceCreateTranscriptionUrl)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
   it("requires write access to import agent session history", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.agentSessionsScan)).toBe(
       AuthOrchestrationReadScope,
