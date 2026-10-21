@@ -1,26 +1,25 @@
-import { VoiceTranscriptionNotConfiguredError } from "@t3tools/contracts";
+import {
+  VoiceTranscriptionNotConfiguredError,
+  type VoiceTranscriptionSettings,
+} from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   createEnvironmentVoiceTranscriber,
   voiceTranscriptionUnavailableReason,
   type EnvironmentVoiceTranscriberDependencies,
-  type VoiceTranscriptionConfiguration,
 } from "./environmentTranscriber.ts";
 import { VoiceTranscriptionError } from "./transcription.ts";
 
 const RECORDING_URI = "blob:https://app.example/recording";
 
-const HOSTED_OPENAI: VoiceTranscriptionConfiguration = {
-  settings: {
-    enabled: true,
-    provider: "openai-compatible",
-    baseUrl: "https://api.openai.com/v1",
-    model: "gpt-transcribe",
-    language: "",
-    apiKey: "••••",
-  },
-  appleOnDeviceTranscription: false,
+const HOSTED_OPENAI: VoiceTranscriptionSettings = {
+  enabled: true,
+  provider: "openai-compatible",
+  baseUrl: "https://api.openai.com/v1",
+  model: "gpt-transcribe",
+  language: "",
+  apiKey: "••••",
 };
 
 type PostResponse = { readonly status: number; readonly body: unknown };
@@ -36,7 +35,7 @@ function deferred<T>() {
 function createHarness(options: {
   readonly audio?: Blob;
   readonly language?: string;
-  readonly configuration?: VoiceTranscriptionConfiguration | null;
+  readonly settings?: VoiceTranscriptionSettings | null;
   readonly post?: PostResponse | ((init: RequestInit) => Promise<Response>);
   readonly createTranscriptionUrl?: EnvironmentVoiceTranscriberDependencies["createTranscriptionUrl"];
   readonly resolveUrl?: EnvironmentVoiceTranscriberDependencies["resolveUrl"];
@@ -59,8 +58,7 @@ function createHarness(options: {
   const transcriber = createEnvironmentVoiceTranscriber({
     language: () => options.language ?? "",
     fallbackLocale: () => "fr-FR",
-    readConfiguration: () =>
-      options.configuration === undefined ? HOSTED_OPENAI : options.configuration,
+    readSettings: () => (options.settings === undefined ? HOSTED_OPENAI : options.settings),
     createTranscriptionUrl:
       options.createTranscriptionUrl ??
       (async (input) => {
@@ -260,15 +258,12 @@ describe("createEnvironmentVoiceTranscriber", () => {
 
   it("refuses to prepare when the environment's own settings cannot transcribe", async () => {
     const signal = new AbortController().signal;
-    const configured = (
-      settings: Partial<VoiceTranscriptionConfiguration["settings"]>,
-      appleOnDeviceTranscription = false,
-    ): VoiceTranscriptionConfiguration => ({
-      settings: { ...HOSTED_OPENAI.settings, ...settings },
-      appleOnDeviceTranscription,
+    const configured = (settings: Partial<VoiceTranscriptionSettings>) => ({
+      ...HOSTED_OPENAI,
+      ...settings,
     });
-    const prepare = (configuration: VoiceTranscriptionConfiguration | null) =>
-      createHarness({ configuration }).transcriber.prepare({ signal });
+    const prepare = (settings: VoiceTranscriptionSettings | null) =>
+      createHarness({ settings }).transcriber.prepare({ signal });
 
     const disabled = await transcriptionError(prepare(configured({ enabled: false })));
     expect(disabled).toMatchObject({
@@ -281,17 +276,35 @@ describe("createEnvironmentVoiceTranscriber", () => {
       prepare(configured({ provider: "xai", baseUrl: "https://api.x.ai/v1/", apiKey: "" })),
     );
     expect(keylessXai.message).toBe("Add an xAI API key to use voice transcription.");
-    const appleElsewhere = await transcriptionError(
-      prepare(configured({ provider: "apple-on-device" })),
-    );
-    expect(appleElsewhere.message).toContain("macOS 26");
 
-    await expect(prepare(configured({ provider: "apple-on-device" }, true))).resolves.toBeDefined();
     await expect(
       prepare(configured({ baseUrl: "http://127.0.0.1:8080/v1", apiKey: "" })),
     ).resolves.toBeDefined();
     await expect(prepare(null)).resolves.toBeDefined();
     expect(voiceTranscriptionUnavailableReason(HOSTED_OPENAI)).toBeNull();
+  });
+
+  it("leaves Apple availability to the environment, which names the reason", async () => {
+    const apple = { ...HOSTED_OPENAI, provider: "apple-on-device" as const, apiKey: "" };
+    await expect(transcribe(createHarness({ settings: apple }))).resolves.toBe("hello world");
+
+    const refused = await transcriptionError(
+      transcribe(
+        createHarness({
+          settings: apple,
+          createTranscriptionUrl: async () => {
+            throw new VoiceTranscriptionNotConfiguredError({
+              reason: "apple-unavailable",
+              providerName: "Apple on-device transcription",
+            });
+          },
+        }),
+      ),
+    );
+    expect(refused).toMatchObject({
+      code: "unavailable",
+      message: "Apple on-device transcription is unavailable on the machine running T3 Code.",
+    });
   });
 
   it.each([

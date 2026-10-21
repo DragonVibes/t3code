@@ -20,20 +20,16 @@ import {
   type VoiceTranscriber,
 } from "./transcription.ts";
 
-/** What the environment already told the client about its transcription setup. */
-export type VoiceTranscriptionConfiguration = {
-  /** `apiKey` arrives redacted; only its presence is meaningful. */
-  readonly settings: VoiceTranscriptionSettings;
-  readonly appleOnDeviceTranscription: boolean;
-};
-
 export type EnvironmentVoiceTranscriberDependencies = {
   /** Configured ISO-639-1 code. Empty lets the model detect the language. */
   readonly language: () => string;
   /** Locale used for transcript spacing when no language is configured. */
   readonly fallbackLocale: () => string;
-  /** Null while the environment's config is unknown, in which case the server decides. */
-  readonly readConfiguration: () => VoiceTranscriptionConfiguration | null;
+  /**
+   * The environment's settings, null while unknown, in which case the server decides.
+   * `apiKey` arrives redacted; only its presence is meaningful.
+   */
+  readonly readSettings: () => VoiceTranscriptionSettings | null;
   /** Rejects with the RPC's tagged error when the environment refuses to mint a URL. */
   readonly createTranscriptionUrl: (
     input: VoiceTranscriptionCreateUrlInput,
@@ -58,17 +54,15 @@ const PROVIDER_NAMES: Record<VoiceTranscriptionProvider, string> = {
 
 /**
  * The checks the server runs before minting an upload URL that the client can
- * repeat from what it already holds, so a misconfigured environment fails before
- * the microphone opens.
+ * repeat from settings it already holds, so a misconfigured environment fails
+ * before recording starts instead of after the upload.
  */
-export function voiceTranscriptionUnavailableReason({
-  settings,
-  appleOnDeviceTranscription,
-}: VoiceTranscriptionConfiguration): VoiceTranscriptionNotConfiguredReason | null {
+export function voiceTranscriptionUnavailableReason(
+  settings: VoiceTranscriptionSettings,
+): VoiceTranscriptionNotConfiguredReason | null {
   if (!settings.enabled) return "disabled";
-  if (settings.provider === "apple-on-device") {
-    return appleOnDeviceTranscription ? null : "apple-unsupported-host";
-  }
+  // The client's capability may predate the Apple probe's first answer, which the mint waits for.
+  if (settings.provider === "apple-on-device") return null;
   const hostedBaseUrl = VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS[settings.provider].baseUrl;
   if (!settings.apiKey && settings.baseUrl.replace(/\/+$/, "") === hostedBaseUrl) {
     return "missing-api-key";
@@ -244,12 +238,12 @@ export function createEnvironmentVoiceTranscriber(
   return {
     prepare: async ({ signal }) => {
       throwIfVoiceTranscriptionAborted(signal);
-      const configuration = dependencies.readConfiguration();
-      const reason = configuration && voiceTranscriptionUnavailableReason(configuration);
+      const settings = dependencies.readSettings();
+      const reason = settings && voiceTranscriptionUnavailableReason(settings);
       if (reason) {
         const refusal = new VoiceTranscriptionNotConfiguredError({
           reason,
-          providerName: PROVIDER_NAMES[configuration.settings.provider],
+          providerName: PROVIDER_NAMES[settings.provider],
         });
         throw new VoiceTranscriptionError("unavailable", refusal.message, { cause: refusal });
       }

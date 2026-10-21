@@ -23,19 +23,22 @@ out, and advertises `capabilities.appleOnDeviceTranscription` only on macOS 26 o
 later once a probe has found a working helper. The descriptor never waits for the
 probe, and a client can subscribe before it answers, as the desktop app does at
 launch. An answer that changes the capability therefore re-sends the server config
-snapshot to every subscriber. That capability is the client's signal to offer
-the provider. The server also refuses to mint an upload URL for it when the
-capability is absent, so a client that skips the check, or settings copied to a
-Linux host, fail with a clear message instead of a missing binary. Only the
-desktop app bundles the helper, so `npx t3` on a Mac does not offer the provider.
+snapshot to every subscriber. That capability is the settings UI's signal to
+offer the provider. Recording never checks it, because the client's copy can
+predate the probe's first answer. The server's URL mint waits for that answer
+and refuses the provider when no working helper was found, so an older macOS or
+settings copied to a Linux host fail with a clear message instead of a missing
+binary. Only the desktop app bundles the helper, so `npx t3` on a Mac does not
+offer the provider.
 
 The [shared controller](../../packages/client-runtime/src/voice-input/controller.ts)
 owns the operation while the client supplies capture and transcription. Preparation
 binds the transcriber and resolved locale for the whole recording. The
 [web transcriber](../../packages/client-runtime/src/voice-input/environmentTranscriber.ts)
-also repeats the server's configuration checks during preparation from the settings
-and capabilities the client already holds, so a misconfigured environment fails with
-the server's wording before the microphone opens. Draft ownership, text, and
+also repeats the server's settings checks during preparation, so a misconfigured
+environment fails with the server's wording before recording starts instead of
+after the upload. Preparation follows the permission request, and on web that
+request has already opened the microphone. Draft ownership, text, and
 revision are captured before recording and checked before insertion, so a late
 transcript cannot overwrite a draft that was edited or replaced; a draft that
 refuses the text, such as a choice-only agent question, counts as changed. A

@@ -13,7 +13,6 @@ export {
 export {
   createEnvironmentVoiceTranscriber,
   type EnvironmentVoiceTranscriberDependencies,
-  type VoiceTranscriptionConfiguration,
 } from "./environmentTranscriber.ts";
 export {
   normalizeVoiceInputDecibels,

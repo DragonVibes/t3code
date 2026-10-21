@@ -30,16 +30,9 @@ export function createWebVoiceTranscriber(
   return createEnvironmentVoiceTranscriber({
     language,
     fallbackLocale: () => navigator.language || "en-US",
-    readConfiguration: () => {
-      const config = appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId));
-      return config
-        ? {
-            settings: config.settings.voiceTranscription,
-            appleOnDeviceTranscription:
-              config.environment.capabilities.appleOnDeviceTranscription === true,
-          }
-        : null;
-    },
+    readSettings: () =>
+      appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId))?.settings
+        .voiceTranscription ?? null,
     createTranscriptionUrl: async (input) => {
       const result = await runAtomCommand(
         appAtomRegistry,
