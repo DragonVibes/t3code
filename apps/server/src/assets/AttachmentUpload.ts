@@ -64,7 +64,6 @@ function decodeClaims(encodedPayload: string): AttachmentUploadClaims | null {
   }
 }
 
-/** Shared with voice transcription upload tokens; each token's `kind` keeps the two apart. */
 export const loadUploadSigningSecret = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   return yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32);

@@ -1,14 +1,16 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import type {
-  VoiceTranscriptionAudioMimeType,
-  VoiceTranscriptionSettings,
+import {
+  ServerSettingsError,
+  type VoiceTranscriptionAudioMimeType,
+  type VoiceTranscriptionSettings,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import {
   HttpClient,
@@ -51,6 +53,10 @@ function setup(
   upstream: (request: HttpClientRequest.HttpClientRequest) => Effect.Effect<Response> = () =>
     Effect.succeed(Response.json({ text: "hello world" })),
   appleSpeech = appleSpeechUnavailable,
+  overrides: {
+    readonly settingsService?: Layer.Layer<ServerSettings.ServerSettingsService>;
+    readonly secretStore?: Layer.Layer<ServerSecretStore.ServerSecretStore>;
+  } = {},
 ) {
   const requests: Array<HttpClientRequest.HttpClientRequest> = [];
   const client = HttpClient.make((request) =>
@@ -61,13 +67,14 @@ function setup(
   );
   const layer = VoiceTranscription.layer.pipe(
     Layer.provideMerge(
-      ServerSettings.layerTest({
-        voiceTranscription: { enabled: true, apiKey: "sk-test", ...settings },
-      }),
+      overrides.settingsService ??
+        ServerSettings.layerTest({
+          voiceTranscription: { enabled: true, apiKey: "sk-test", ...settings },
+        }),
     ),
     Layer.provide(Layer.succeed(HttpClient.HttpClient, client)),
     Layer.provide(Layer.succeed(AppleSpeechHelper.AppleSpeechHelper, appleSpeech)),
-    Layer.provideMerge(ServerSecretStore.layer),
+    Layer.provideMerge(overrides.secretStore ?? ServerSecretStore.layer),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-voice-test-" })),
     Layer.provideMerge(NodeServices.layer),
   );
@@ -191,11 +198,21 @@ describe("VoiceTranscription", () => {
     { settings: { ...xai, apiKey: "" }, message: "xAI API key" },
     { settings: xai, message: "xAI does not accept audio/webm recordings." },
     { settings: apple, message: "Apple on-device transcription needs macOS 26 or later" },
+    {
+      settings: apple,
+      appleSpeech: appleSpeechWith("unavailable"),
+      message: "Apple on-device transcription is unavailable on the machine running T3 Code.",
+    },
     { settings: { model: "" }, message: "model name" },
     { settings: { baseUrl: "" }, message: "endpoint URL" },
     { settings: { baseUrl: "ftp://whisper.local" }, message: "not valid" },
-  ] as const)("refuses to mint an upload URL when $message", ({ settings, message }) => {
-    const { layer } = setup(settings);
+  ] as const)("refuses to mint an upload URL when $message", (expected) => {
+    const { settings, message } = expected;
+    const { layer } = setup(
+      settings,
+      undefined,
+      "appleSpeech" in expected ? expected.appleSpeech : undefined,
+    );
     return Effect.gen(function* () {
       const error = yield* Effect.flip(mint);
       expect(error._tag).toBe("VoiceTranscriptionNotConfiguredError");
@@ -351,11 +368,11 @@ describe("VoiceTranscription", () => {
     return Effect.gen(function* () {
       const issued = yield* mint;
       const settings = yield* ServerSettings.ServerSettingsService;
-      yield* settings.updateSettings({ voiceTranscription: xai });
+      yield* settings.updateSettings({ voiceTranscription: { ...xai, apiKey: "sk-xai" } });
       const response = yield* post(issued.relativeUrl);
       expect(response).toEqual({
-        status: 400,
-        body: { code: "invalid_upload", message: "xAI does not accept audio/webm recordings." },
+        status: 409,
+        body: { code: "not_configured", message: "xAI does not accept audio/webm recordings." },
       });
       expect(requests).toHaveLength(0);
     }).pipe(Effect.provide(layer));
@@ -368,36 +385,83 @@ describe("VoiceTranscription", () => {
         { status: 401 },
       ),
       code: "upstream_rejected_credentials",
-      message: "api.openai.com rejected the API key (HTTP 401): Incorrect API key provided: [key].",
+      message: "The transcription service at api.openai.com rejected the API key (HTTP 401).",
+      cause: "Incorrect API key provided: [key].",
     },
     {
       upstream: Response.json({ error: "model not loaded" }, { status: 500 }),
       code: "upstream_failed",
-      message: "api.openai.com answered HTTP 500: model not loaded",
+      message: "The transcription service at api.openai.com answered HTTP 500.",
+      cause: "model not loaded",
     },
     {
       upstream: new Response("<html>bad gateway</html>", { status: 503 }),
       code: "upstream_failed",
-      message: "api.openai.com answered HTTP 503.",
+      message: "The transcription service at api.openai.com answered HTTP 503.",
+      cause: undefined,
     },
     {
       upstream: Response.json({ transcript: "wrong shape" }),
       code: "upstream_failed",
-      message: "api.openai.com returned an unexpected response.",
+      message: "The transcription service at api.openai.com returned an unexpected response.",
+      cause: undefined,
     },
   ])(
     "answers $code with a 502 for upstream HTTP $upstream.status",
-    ({ upstream, code, message }) => {
-      const { layer } = setup({}, () => Effect.succeed(upstream));
+    ({ upstream, code, message, cause }) => {
+      const { layer } = setup({}, () => Effect.succeed(upstream.clone()));
       return Effect.gen(function* () {
         const response = yield* post((yield* mint).relativeUrl);
-        expect(response.status).toBe(502);
-        expect(response.body.code).toBe(code);
-        expect(response.body.message).toContain(message);
-        expect(JSON.stringify(response.body)).not.toContain("sk-test");
+        expect(response).toEqual({ status: 502, body: { code, message } });
+
+        const voice = yield* VoiceTranscription.VoiceTranscription;
+        const token = (yield* mint).relativeUrl.split("/").at(-1)!;
+        const claims = Option.getOrThrow(yield* voice.verifyUploadToken(token));
+        const error = yield* Effect.flip(voice.transcribe(claims, audio));
+        if (cause !== undefined) {
+          expect(error.cause).toBeInstanceOf(Error);
+          expect((error.cause as Error).message).toBe(cause);
+        }
       }).pipe(Effect.provide(layer));
     },
   );
+
+  it.effect("answers internal when the settings cannot be read", () => {
+    const { layer } = setup({}, undefined, undefined, {
+      settingsService: Layer.mock(ServerSettings.ServerSettingsService)({
+        getSettings: Effect.fail(
+          new ServerSettingsError({ settingsPath: "settings.json", operation: "read-file" }),
+        ),
+      }),
+    });
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(mint);
+      expect(error._tag).toBe("VoiceTranscriptionInternalError");
+      expect(error.message).toBe("Voice transcription hit a server error.");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("answers internal instead of an invalid link when the signing key cannot load", () => {
+    const { layer, requests } = setup({}, undefined, undefined, {
+      secretStore: Layer.mock(ServerSecretStore.ServerSecretStore)({
+        getOrCreateRandom: () =>
+          Effect.fail(
+            new ServerSecretStore.SecretStoreReadError({
+              resource: "upload signing key",
+              cause: new Error("disk unreadable"),
+            }),
+          ),
+      }),
+    });
+    return Effect.gen(function* () {
+      const response = yield* post("/api/voice/transcriptions/payload.signature");
+      expect(response).toEqual({
+        status: 500,
+        body: { code: "internal", message: "Voice transcription hit a server error." },
+      });
+      expect(requests).toHaveLength(0);
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect("answers upstream_failed when the service does not answer in time", () =>
     Effect.gen(function* () {

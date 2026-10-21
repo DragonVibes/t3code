@@ -504,6 +504,7 @@ const VOICE_TRANSCRIPTION_FAILURE_STATUS = {
   not_configured: 409,
   upstream_rejected_credentials: 502,
   upstream_failed: 502,
+  internal: 500,
 } as const satisfies Record<VoiceTranscriptionFailureCode, number>;
 
 const voiceTranscriptionFailure = (code: VoiceTranscriptionFailureCode, message: string) =>
@@ -548,32 +549,37 @@ export const layerVoiceTranscriptionRoute = HttpRouter.add(
       return voiceTranscriptionFailure("invalid_upload", "Could not read the recording.");
     }
 
-    return yield* voiceTranscription.transcribe(claims.value, audio.value).pipe(
-      Effect.map((result) =>
-        HttpServerResponse.jsonUnsafe(result, { headers: { "cache-control": "no-store" } }),
-      ),
-      Effect.catchTags({
-        VoiceTranscriptionNotConfiguredError: (error) =>
-          Effect.succeed(voiceTranscriptionFailure("not_configured", error.message)),
-        VoiceTranscriptionInvalidUploadError: (error) =>
-          Effect.succeed(voiceTranscriptionFailure("invalid_upload", error.message)),
-        VoiceTranscriptionUnsupportedFormatError: (error) =>
-          Effect.succeed(voiceTranscriptionFailure("invalid_upload", error.message)),
-        VoiceTranscriptionCredentialsRejectedError: (error) =>
-          Effect.succeed(voiceTranscriptionFailure("upstream_rejected_credentials", error.message)),
-        VoiceTranscriptionUpstreamError: (error) =>
-          Effect.logWarning("Voice transcription failed upstream.", { cause: error }).pipe(
-            Effect.as(voiceTranscriptionFailure("upstream_failed", error.message)),
-          ),
-        AppleSpeechUnsupportedLocaleError: (error) =>
-          Effect.succeed(voiceTranscriptionFailure("not_configured", error.message)),
-        AppleSpeechHelperError: (error) =>
-          Effect.logWarning("Voice transcription failed in the Apple speech helper.", {
-            cause: error,
-          }).pipe(Effect.as(voiceTranscriptionFailure("upstream_failed", error.message))),
-      }),
-    );
-  }),
+    return yield* voiceTranscription
+      .transcribe(claims.value, audio.value)
+      .pipe(
+        Effect.map((result) =>
+          HttpServerResponse.jsonUnsafe(result, { headers: { "cache-control": "no-store" } }),
+        ),
+      );
+  }).pipe(
+    Effect.catchTags({
+      VoiceTranscriptionNotConfiguredError: (error) =>
+        Effect.succeed(voiceTranscriptionFailure("not_configured", error.message)),
+      VoiceTranscriptionInvalidUploadError: (error) =>
+        Effect.succeed(voiceTranscriptionFailure("invalid_upload", error.message)),
+      VoiceTranscriptionInternalError: (error) =>
+        Effect.succeed(voiceTranscriptionFailure("internal", error.message)),
+      VoiceTranscriptionCredentialsRejectedError: (error) =>
+        Effect.logWarning("Voice transcription credentials were rejected upstream.", {
+          cause: error,
+        }).pipe(
+          Effect.as(voiceTranscriptionFailure("upstream_rejected_credentials", error.message)),
+        ),
+      VoiceTranscriptionUpstreamError: (error) =>
+        Effect.logWarning("Voice transcription failed upstream.", { cause: error }).pipe(
+          Effect.as(voiceTranscriptionFailure("upstream_failed", error.message)),
+        ),
+      AppleSpeechHelperError: (error) =>
+        Effect.logWarning("Voice transcription failed in the Apple speech helper.", {
+          cause: error,
+        }).pipe(Effect.as(voiceTranscriptionFailure("upstream_failed", error.message))),
+    }),
+  ),
 );
 
 const decodeBuildManifest = Schema.decodeUnknownEffect(
