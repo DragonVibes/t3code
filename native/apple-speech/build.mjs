@@ -49,6 +49,7 @@ try {
 if (!current) {
   NodeFS.mkdirSync(NodePath.dirname(output), { recursive: true });
   const temporaries = arches.map((arch) => `${output}.${arch}.${process.pid}.tmp`);
+  const universal = `${output}.universal.${process.pid}.tmp`;
   try {
     arches.forEach((arch, index) => {
       NodeChildProcess.execFileSync(
@@ -70,11 +71,12 @@ if (!current) {
     if (temporaries.length === 1) {
       NodeFS.renameSync(temporaries[0], output);
     } else {
-      NodeChildProcess.execFileSync("lipo", ["-create", ...temporaries, "-output", output], {
+      NodeChildProcess.execFileSync("lipo", ["-create", ...temporaries, "-output", universal], {
         stdio: "inherit",
       });
+      NodeFS.renameSync(universal, output);
     }
   } finally {
-    for (const temporary of temporaries) NodeFS.rmSync(temporary, { force: true });
+    for (const temporary of [...temporaries, universal]) NodeFS.rmSync(temporary, { force: true });
   }
 }
