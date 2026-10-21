@@ -104,8 +104,8 @@ import {
 import {
   VoiceTranscriptionCreateUrlInput,
   VoiceTranscriptionCreateUrlResult,
+  VoiceTranscriptionInternalError,
   VoiceTranscriptionNotConfiguredError,
-  VoiceTranscriptionSigningKeyError,
 } from "./voiceTranscription.ts";
 import {
   PersistChatAttachmentsError,
@@ -1322,7 +1322,7 @@ const WsVoiceCreateTranscriptionUrlRpc = Rpc.make(WS_METHODS.voiceCreateTranscri
   success: VoiceTranscriptionCreateUrlResult,
   error: Schema.Union([
     VoiceTranscriptionNotConfiguredError,
-    VoiceTranscriptionSigningKeyError,
+    VoiceTranscriptionInternalError,
     EnvironmentAuthorizationError,
   ]),
 });

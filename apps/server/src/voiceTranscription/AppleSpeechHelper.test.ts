@@ -2,7 +2,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, expect, it } from "@effect/vitest";
-import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -92,6 +92,7 @@ describe("AppleSpeechHelper", () => {
   it.effect.skipIf(!realHelperUsable)("probes the built helper through the real layer", () =>
     Effect.gen(function* () {
       const service = yield* AppleSpeechHelper.AppleSpeechHelper;
+      expect(yield* service.availability).toBe("available");
       expect(yield* service.available).toBe(true);
     }).pipe(
       Effect.provide(
@@ -111,6 +112,7 @@ describe("AppleSpeechHelper", () => {
   ] as const)("never spawns the helper on $platform $kernelRelease", (host) =>
     Effect.gen(function* () {
       const { service, runs } = yield* setup(host, () => Effect.die("must not spawn"));
+      expect(yield* service.availability).toBe("unsupported-host");
       expect(yield* service.available).toBe(false);
       const error = yield* Effect.flip(service.transcribe({ audio, locale: "en" }));
       assert.instanceOf(error, AppleSpeechHelper.AppleSpeechHelperError);
@@ -140,10 +142,24 @@ describe("AppleSpeechHelper", () => {
   ])("reads a $name probe once and caches it", ({ probe, available }) =>
     Effect.gen(function* () {
       const { service, runs, helperPath } = yield* setup(macOS26, () => Effect.succeed(probe));
+      expect(yield* service.availability).toBe(available ? "available" : "unavailable");
       expect(yield* service.available).toBe(available);
       expect(yield* service.available).toBe(available);
       expect(runs).toHaveLength(1);
       expect(runs[0]).toMatchObject({ command: helperPath, args: ["probe"] });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("reports unavailable without waiting while the first probe is still running", () =>
+    Effect.gen(function* () {
+      const release = yield* Deferred.make<void>();
+      const { service } = yield* setup(macOS26, () =>
+        Deferred.await(release).pipe(Effect.as(output({ stdout: probeAvailable }))),
+      );
+      expect(yield* service.available).toBe(false);
+      yield* Deferred.succeed(release, undefined);
+      expect(yield* service.availability).toBe("available");
+      expect(yield* service.available).toBe(true);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -157,12 +173,29 @@ describe("AppleSpeechHelper", () => {
             : output({ stdout: probeAvailable }),
         ),
       );
+      expect(yield* service.availability).toBe("unavailable");
       expect(yield* service.available).toBe(false);
-      expect(yield* service.available).toBe(false);
+      yield* TestClock.adjust("59 seconds");
       expect(runs).toHaveLength(1);
-      yield* TestClock.adjust("1 minute");
-      expect(yield* service.available).toBe(true);
+      yield* TestClock.adjust("1 second");
       expect(runs).toHaveLength(2);
+      expect(yield* service.available).toBe(true);
+      expect(yield* service.availability).toBe("available");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("stops retrying a probe that keeps timing out", () =>
+    Effect.gen(function* () {
+      const { service, runs } = yield* setup(macOS26, () =>
+        Effect.succeed(output({ code: null, timedOut: true })),
+      );
+      expect(yield* service.availability).toBe("unavailable");
+      yield* TestClock.adjust("1 hour");
+      const attempts = runs.length;
+      expect(attempts).toBeGreaterThan(1);
+      yield* TestClock.adjust("1 hour");
+      expect(runs).toHaveLength(attempts);
+      expect(yield* service.available).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -177,6 +210,7 @@ describe("AppleSpeechHelper", () => {
           }),
         ),
       );
+      expect(yield* service.availability).toBe("unavailable");
       expect(yield* service.available).toBe(false);
       expect(runs).toHaveLength(1);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
@@ -204,7 +238,6 @@ describe("AppleSpeechHelper", () => {
       const run = runs[1]!;
       expect(run.command).toBe(helperPath);
       expect(run.args).toEqual(["transcribe", "--locale", "en", wavPath]);
-      expect(Duration.toMillis(Duration.fromInputUnsafe(run.timeout!))).toBe(120_000);
       expect(yield* fileSystem.exists(wavPath)).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

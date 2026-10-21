@@ -398,10 +398,6 @@ const MAC_DESKTOP_BUILD_PREREQUISITES = [
   { id: "sips", description: "macOS image tool (sips)" },
   { id: "iconutil", description: "macOS icon tool (iconutil)" },
   { id: "lipo", description: "Xcode universal-binary tool (lipo)" },
-  {
-    id: "macosSdk26",
-    description: "Xcode 26 or later (the macOS 26 SDK builds the Apple speech helper)",
-  },
 ] as const;
 
 export class MacDesktopBuildPrerequisitesMissingError extends Schema.TaggedError<MacDesktopBuildPrerequisitesMissingError>()(
@@ -2033,7 +2029,6 @@ export const preflightMacDesktopBuild = Effect.fn("preflightMacDesktopBuild")(fu
         arch === "universal"
           ? desktopBuildProbeSucceeds(ChildProcess.make("lipo", ["-version"]), "lipo")
           : Effect.succeed(true),
-      macosSdk26: macSdkSupportsSpeechAnalyzer(),
     },
     { concurrency: "unbounded" },
   );
@@ -2532,6 +2527,12 @@ export const stageAppleSpeechHelper = Effect.fn("stageAppleSpeechHelper")(functi
   readonly verbose: boolean;
 }) {
   if (input.platform !== "mac") return;
+  if (!(yield* macSdkSupportsSpeechAnalyzer())) {
+    yield* Effect.log(
+      "[desktop-artifact] Building the Apple speech helper needs the macOS 26 SDK (Xcode 26 or Command Line Tools 26); the app ships without Apple on-device transcription.",
+    );
+    return;
+  }
   const path = yield* Path.Path;
   yield* runCommand(
     ChildProcess.make(

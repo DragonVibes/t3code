@@ -33,6 +33,8 @@ func emit<Output: Encodable>(_ output: Output) {
   FileHandle.standardOutput.write(Data("\n".utf8))
 }
 
+let assetDownloadTimeoutSeconds = 90
+
 func fail(_ code: String, _ message: String) -> Never {
   emit(ErrorOutput(error: .init(code: code, message: message)))
   exit(1)
@@ -56,7 +58,25 @@ func transcribe(localeIdentifier: String, wavPath: String) async {
   guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: requested) else {
     fail("unsupported_locale", "No speech model supports the locale '\(requested.identifier)'.")
   }
+  let file: AVAudioFile
+  do {
+    file = try AVAudioFile(forReading: URL(fileURLWithPath: wavPath))
+  } catch {
+    fail("failed", "Could not read the recording: \(error)")
+  }
+  guard file.length > 0 else {
+    emit(TranscribeOutput(text: "", locale: locale.identifier))
+    return
+  }
   let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
+  // The server's own timeout is longer, so a stalled first download reports
+  // as a model download failure instead of a generic timeout.
+  let assetWatchdog = Task {
+    try await Task.sleep(for: .seconds(assetDownloadTimeoutSeconds))
+    fail(
+      "assets_failed",
+      "The speech model for '\(locale.identifier)' did not download within \(assetDownloadTimeoutSeconds) seconds.")
+  }
   do {
     if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
       try await request.downloadAndInstall()
@@ -64,17 +84,19 @@ func transcribe(localeIdentifier: String, wavPath: String) async {
   } catch {
     fail("assets_failed", "Could not install the speech model for '\(locale.identifier)': \(error)")
   }
+  assetWatchdog.cancel()
   let analyzer = SpeechAnalyzer(modules: [transcriber])
   // An unstructured task, so a throw below exits the process instead of
   // waiting for a results stream that may never finish.
   let transcript = Task { try await transcriber.results.reduce("") { $0 + String($1.text.characters) } }
   do {
-    let file = try AVAudioFile(forReading: URL(fileURLWithPath: wavPath))
-    if let last = try await analyzer.analyzeSequence(from: file) {
-      try await analyzer.finalizeAndFinish(through: last)
-    } else {
+    guard let last = try await analyzer.analyzeSequence(from: file) else {
       await analyzer.cancelAndFinishNow()
+      transcript.cancel()
+      emit(TranscribeOutput(text: "", locale: locale.identifier))
+      return
     }
+    try await analyzer.finalizeAndFinish(through: last)
     emit(TranscribeOutput(text: try await transcript.value, locale: locale.identifier))
   } catch {
     fail("failed", "Transcription failed: \(error)")

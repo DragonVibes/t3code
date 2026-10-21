@@ -4,19 +4,24 @@ import {
   VoiceTranscriptionAudioMimeType,
   type VoiceTranscriptionCreateUrlInput,
   type VoiceTranscriptionCreateUrlResult,
+  VoiceTranscriptionInternalError,
   VoiceTranscriptionNotConfiguredError,
+  type VoiceTranscriptionNotConfiguredReason,
   type VoiceTranscriptionProvider,
   type VoiceTranscriptionResult,
   type VoiceTranscriptionSettings,
-  VoiceTranscriptionSigningKeyError,
 } from "@t3tools/contracts";
+import { isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http";
 
 import { loadUploadSigningSecret } from "../assets/AttachmentUpload.ts";
@@ -34,6 +39,93 @@ export const VOICE_TRANSCRIPTION_ROUTE_PREFIX = "/api/voice/transcriptions";
 
 const UPSTREAM_TIMEOUT_SECONDS = 90;
 const UPSTREAM_MESSAGE_MAX_LENGTH = 300;
+const UPSTREAM_BODY_MAX_BYTES = 1024 * 1024;
+
+export class VoiceTranscriptionInvalidUploadError extends Schema.TaggedError<VoiceTranscriptionInvalidUploadError>()(
+  "VoiceTranscriptionInvalidUploadError",
+  {
+    expectedBytes: Schema.Number,
+    receivedBytes: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `The recording was ${this.receivedBytes} bytes, expected ${this.expectedBytes}.`;
+  }
+}
+
+export class VoiceTranscriptionCredentialsRejectedError extends Schema.TaggedError<VoiceTranscriptionCredentialsRejectedError>()(
+  "VoiceTranscriptionCredentialsRejectedError",
+  {
+    host: Schema.String,
+    status: Schema.Number,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `The transcription service at ${this.host} rejected the API key (HTTP ${this.status}).`;
+  }
+}
+
+export class VoiceTranscriptionUpstreamError extends Schema.TaggedError<VoiceTranscriptionUpstreamError>()(
+  "VoiceTranscriptionUpstreamError",
+  {
+    host: Schema.String,
+    stage: Schema.Literals(["request", "timeout", "status", "response"]),
+    status: Schema.optional(Schema.Number),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    switch (this.stage) {
+      case "request":
+        return `Could not reach the transcription service at ${this.host}.`;
+      case "timeout":
+        return `The transcription service at ${this.host} did not answer within ${UPSTREAM_TIMEOUT_SECONDS} seconds.`;
+      case "status":
+        return `The transcription service at ${this.host} answered HTTP ${this.status}.`;
+      case "response":
+        return `The transcription service at ${this.host} returned an unexpected response.`;
+    }
+  }
+}
+
+class VoiceTranscriptionUpstreamBodyTooLargeError extends Schema.TaggedError<VoiceTranscriptionUpstreamBodyTooLargeError>()(
+  "VoiceTranscriptionUpstreamBodyTooLargeError",
+  {
+    maxBytes: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `The transcription service answered with more than ${this.maxBytes} bytes.`;
+  }
+}
+
+const VoiceTranscriptionClaims = Schema.Struct({
+  version: Schema.Literal(1),
+  kind: Schema.Literal("voice-transcription"),
+  /** Keeps two otherwise identical links distinct, since each is accepted once. */
+  nonce: Schema.String,
+  mimeType: VoiceTranscriptionAudioMimeType,
+  sizeBytes: Schema.Number,
+  expiresAt: Schema.Number,
+});
+export type VoiceTranscriptionClaims = typeof VoiceTranscriptionClaims.Type;
+
+const claimsJson = Schema.fromJsonString(VoiceTranscriptionClaims);
+const decodeClaims = Schema.decodeUnknownOption(claimsJson);
+const encodeClaims = Schema.encodeSync(claimsJson);
+
+const decodeTranscript = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ text: Schema.String })),
+);
+// OpenAI nests the message under `error`; some compatible servers send `error` as a plain string.
+const decodeUpstreamError = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      error: Schema.Union([Schema.Struct({ message: Schema.String }), Schema.String]),
+    }),
+  ),
+);
 
 const AUDIO_FILE_EXTENSIONS = {
   "audio/webm": "webm",
@@ -109,127 +201,6 @@ const PROVIDER_BACKENDS = {
   },
 } as const satisfies Record<VoiceTranscriptionProvider, ProviderBackend>;
 
-const VoiceTranscriptionClaims = Schema.Struct({
-  version: Schema.Literal(1),
-  kind: Schema.Literal("voice-transcription"),
-  mimeType: VoiceTranscriptionAudioMimeType,
-  sizeBytes: Schema.Number,
-  expiresAt: Schema.Number,
-});
-export type VoiceTranscriptionClaims = typeof VoiceTranscriptionClaims.Type;
-
-const claimsJson = Schema.fromJsonString(VoiceTranscriptionClaims);
-const decodeClaims = Schema.decodeUnknownOption(claimsJson);
-const encodeClaims = Schema.encodeSync(claimsJson);
-
-const decodeTranscript = Schema.decodeUnknownEffect(Schema.Struct({ text: Schema.String }));
-// OpenAI nests the message under `error`; some compatible servers send `error` as a plain string.
-const decodeUpstreamError = Schema.decodeUnknownOption(
-  Schema.fromJsonString(
-    Schema.Struct({
-      error: Schema.Union([Schema.Struct({ message: Schema.String }), Schema.String]),
-    }),
-  ),
-);
-
-export class VoiceTranscriptionInvalidUploadError extends Schema.TaggedError<VoiceTranscriptionInvalidUploadError>()(
-  "VoiceTranscriptionInvalidUploadError",
-  {
-    expectedBytes: Schema.Number,
-    receivedBytes: Schema.Number,
-  },
-) {
-  override get message(): string {
-    return `The recording was ${this.receivedBytes} bytes, expected ${this.expectedBytes}.`;
-  }
-}
-
-export class VoiceTranscriptionUnsupportedFormatError extends Schema.TaggedError<VoiceTranscriptionUnsupportedFormatError>()(
-  "VoiceTranscriptionUnsupportedFormatError",
-  {
-    providerName: Schema.String,
-    mimeType: VoiceTranscriptionAudioMimeType,
-  },
-) {
-  override get message(): string {
-    return unsupportedFormatMessage(this.providerName, this.mimeType);
-  }
-}
-
-const unsupportedFormatMessage = (
-  providerName: string,
-  mimeType: VoiceTranscriptionAudioMimeType,
-) => `${providerName} does not accept ${mimeType} recordings.`;
-
-export class VoiceTranscriptionCredentialsRejectedError extends Schema.TaggedError<VoiceTranscriptionCredentialsRejectedError>()(
-  "VoiceTranscriptionCredentialsRejectedError",
-  {
-    host: Schema.String,
-    status: Schema.Number,
-    upstreamMessage: Schema.optional(Schema.String),
-  },
-) {
-  override get message(): string {
-    return `The transcription service at ${this.host} rejected the API key (HTTP ${this.status})${
-      this.upstreamMessage ? `: ${this.upstreamMessage}` : "."
-    }`;
-  }
-}
-
-export class VoiceTranscriptionUpstreamError extends Schema.TaggedError<VoiceTranscriptionUpstreamError>()(
-  "VoiceTranscriptionUpstreamError",
-  {
-    host: Schema.String,
-    stage: Schema.Literals(["request", "timeout", "status", "response"]),
-    status: Schema.optional(Schema.Number),
-    upstreamMessage: Schema.optional(Schema.String),
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {
-  override get message(): string {
-    switch (this.stage) {
-      case "request":
-        return `Could not reach the transcription service at ${this.host}.`;
-      case "timeout":
-        return `The transcription service at ${this.host} did not answer within ${UPSTREAM_TIMEOUT_SECONDS} seconds.`;
-      case "status":
-        return `The transcription service at ${this.host} answered HTTP ${this.status}${
-          this.upstreamMessage ? `: ${this.upstreamMessage}` : "."
-        }`;
-      case "response":
-        return `The transcription service at ${this.host} returned an unexpected response.`;
-    }
-  }
-}
-
-export class VoiceTranscription extends Context.Service<
-  VoiceTranscription,
-  {
-    readonly createUploadUrl: (
-      input: VoiceTranscriptionCreateUrlInput,
-    ) => Effect.Effect<
-      VoiceTranscriptionCreateUrlResult,
-      VoiceTranscriptionNotConfiguredError | VoiceTranscriptionSigningKeyError
-    >;
-    readonly verifyUploadToken: (
-      token: string,
-    ) => Effect.Effect<Option.Option<VoiceTranscriptionClaims>>;
-    readonly transcribe: (
-      claims: VoiceTranscriptionClaims,
-      audio: Uint8Array<ArrayBuffer>,
-    ) => Effect.Effect<
-      VoiceTranscriptionResult,
-      | VoiceTranscriptionNotConfiguredError
-      | VoiceTranscriptionInvalidUploadError
-      | VoiceTranscriptionUnsupportedFormatError
-      | VoiceTranscriptionCredentialsRejectedError
-      | VoiceTranscriptionUpstreamError
-      | AppleSpeechHelper.AppleSpeechHelperError
-      | AppleSpeechHelper.AppleSpeechUnsupportedLocaleError
-    >;
-  }
->()("t3/voiceTranscription/VoiceTranscription") {}
-
 type HttpTranscriptionEndpoint = HttpProviderBackend & {
   readonly url: string;
   readonly host: string;
@@ -242,103 +213,155 @@ type TranscriptionEndpoint =
   | HttpTranscriptionEndpoint
   | (AppleProviderBackend & { readonly language: string });
 
-const resolveEndpoint = Effect.fn("VoiceTranscription.resolveEndpoint")(function* (
-  settings: VoiceTranscriptionSettings,
-  appleSpeechAvailable: Effect.Effect<boolean>,
-): Effect.fn.Return<TranscriptionEndpoint, VoiceTranscriptionNotConfiguredError> {
-  const notConfigured = (message: string) => new VoiceTranscriptionNotConfiguredError({ message });
-  if (!settings.enabled) {
-    return yield* notConfigured("Voice transcription is turned off for this environment.");
-  }
-  const backend = PROVIDER_BACKENDS[settings.provider];
-  if (backend.kind === "apple") {
-    if (!(yield* appleSpeechAvailable)) {
-      return yield* notConfigured(
-        "Apple on-device transcription needs macOS 26 or later on the machine running T3 Code.",
-      );
-    }
-    return { ...backend, language: settings.language };
-  }
-  const baseUrl = settings.baseUrl.replace(/\/+$/, "");
-  if (!baseUrl) return yield* notConfigured("Voice transcription needs an endpoint URL.");
-  if (!settings.model) return yield* notConfigured("Voice transcription needs a model name.");
-  // Local whisper.cpp-style servers take no key, but the hosted defaults always do.
-  if (!settings.apiKey && baseUrl === backend.hostedBaseUrl) {
-    return yield* notConfigured(`Add an ${backend.name} API key to use voice transcription.`);
-  }
-  const url = URL.parse(`${baseUrl}/${backend.path}`);
-  if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) {
-    return yield* notConfigured("The voice transcription endpoint URL is not valid.");
-  }
-  return {
-    ...backend,
-    url: url.toString(),
-    host: url.host,
-    model: settings.model,
-    language: settings.language,
-    apiKey: settings.apiKey,
-  };
-});
+const acceptsMimeType = (backend: ProviderBackend, mimeType: VoiceTranscriptionAudioMimeType) =>
+  backend.acceptedMimeTypes.includes(mimeType);
 
-const readUpstreamMessage = (
-  response: HttpClientResponse.HttpClientResponse,
-  endpoint: HttpTranscriptionEndpoint,
-) =>
-  response.text.pipe(
-    Effect.map((body) =>
-      Option.getOrUndefined(
-        Option.map(decodeUpstreamError(body), ({ error }) => {
-          const message = typeof error === "string" ? error : error.message;
-          const redacted = endpoint.apiKey ? message.replaceAll(endpoint.apiKey, "[key]") : message;
-          return redacted.slice(0, UPSTREAM_MESSAGE_MAX_LENGTH);
-        }),
+const orInternalError =
+  (stage: VoiceTranscriptionInternalError["stage"]) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.tapError((cause) =>
+        Effect.logError("Voice transcription hit a server error.", { stage, cause }),
       ),
-    ),
-    Effect.orElseSucceed(() => undefined),
-  );
+      Effect.mapError((cause) => new VoiceTranscriptionInternalError({ stage, cause })),
+    );
+
+export class VoiceTranscription extends Context.Service<
+  VoiceTranscription,
+  {
+    readonly createUploadUrl: (
+      input: VoiceTranscriptionCreateUrlInput,
+    ) => Effect.Effect<
+      VoiceTranscriptionCreateUrlResult,
+      VoiceTranscriptionNotConfiguredError | VoiceTranscriptionInternalError
+    >;
+    readonly verifyUploadToken: (
+      token: string,
+    ) => Effect.Effect<Option.Option<VoiceTranscriptionClaims>, VoiceTranscriptionInternalError>;
+    readonly transcribe: (
+      claims: VoiceTranscriptionClaims,
+      audio: Uint8Array<ArrayBuffer>,
+    ) => Effect.Effect<
+      VoiceTranscriptionResult,
+      | VoiceTranscriptionNotConfiguredError
+      | VoiceTranscriptionInvalidUploadError
+      | VoiceTranscriptionCredentialsRejectedError
+      | VoiceTranscriptionUpstreamError
+      | VoiceTranscriptionInternalError
+      | AppleSpeechHelper.AppleSpeechHelperError
+    >;
+  }
+>()("t3/voiceTranscription/VoiceTranscription") {}
 
 const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const client = yield* HttpClient.HttpClient;
   const appleSpeech = yield* AppleSpeechHelper.AppleSpeechHelper;
+  const crypto = yield* Crypto.Crypto;
+  const consumedSignatures = yield* Ref.make(new Map<string, number>());
 
   const signingSecret = loadUploadSigningSecret.pipe(
     Effect.provideService(ServerSecretStore.ServerSecretStore, secretStore),
+    orInternalError("load-signing-key"),
   );
 
-  const loadEndpoint = settingsService.getSettings.pipe(
-    Effect.tapError((cause) =>
-      Effect.logError("Failed to read voice transcription settings.", { cause }),
-    ),
-    Effect.mapError(
-      () =>
-        new VoiceTranscriptionNotConfiguredError({
-          message: "Could not read the voice transcription settings.",
-        }),
-    ),
-    Effect.flatMap((settings) =>
-      resolveEndpoint(settings.voiceTranscription, appleSpeech.available),
-    ),
-  );
+  const resolveEndpoint = Effect.fn("VoiceTranscription.resolveEndpoint")(function* (
+    settings: VoiceTranscriptionSettings,
+  ): Effect.fn.Return<TranscriptionEndpoint, VoiceTranscriptionNotConfiguredError> {
+    const backend = PROVIDER_BACKENDS[settings.provider];
+    const notConfigured = (reason: VoiceTranscriptionNotConfiguredReason) =>
+      new VoiceTranscriptionNotConfiguredError({ reason, providerName: backend.name });
+    if (!settings.enabled) return yield* notConfigured("disabled");
+    if (backend.kind === "apple") {
+      const availability = yield* appleSpeech.availability;
+      if (availability !== "available") {
+        return yield* notConfigured(
+          availability === "unsupported-host" ? "apple-unsupported-host" : "apple-unavailable",
+        );
+      }
+      return { ...backend, language: settings.language };
+    }
+    const baseUrl = settings.baseUrl.replace(/\/+$/, "");
+    if (!baseUrl) return yield* notConfigured("missing-base-url");
+    if (!settings.model) return yield* notConfigured("missing-model");
+    if (!settings.apiKey && baseUrl === backend.hostedBaseUrl) {
+      return yield* notConfigured("missing-api-key");
+    }
+    const url = URL.parse(`${baseUrl}/${backend.path}`);
+    if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) {
+      return yield* notConfigured("invalid-base-url");
+    }
+    if (url.protocol === "http:" && settings.apiKey && !isPrivateNetworkHost(url.hostname)) {
+      return yield* notConfigured("insecure-base-url");
+    }
+    return {
+      ...backend,
+      url: url.toString(),
+      host: url.host,
+      model: settings.model,
+      language: settings.language,
+      apiKey: settings.apiKey,
+    };
+  });
+
+  const loadEndpoint = Effect.fn("VoiceTranscription.loadEndpoint")(function* (
+    mimeType: VoiceTranscriptionAudioMimeType,
+  ) {
+    const settings = yield* settingsService.getSettings.pipe(orInternalError("read-settings"));
+    const endpoint = yield* resolveEndpoint(settings.voiceTranscription);
+    if (!acceptsMimeType(endpoint, mimeType)) {
+      return yield* new VoiceTranscriptionNotConfiguredError({
+        reason: "unsupported-format",
+        providerName: endpoint.name,
+        mimeType,
+      });
+    }
+    return endpoint;
+  });
+
+  const readUpstreamText = Effect.fn("VoiceTranscription.readUpstreamText")(function* (
+    response: HttpClientResponse.HttpClientResponse,
+  ) {
+    const decoder = new TextDecoder();
+    let text = "";
+    let receivedBytes = 0;
+    yield* Stream.runForEach(response.stream, (chunk) => {
+      receivedBytes += chunk.byteLength;
+      if (receivedBytes > UPSTREAM_BODY_MAX_BYTES) {
+        return new VoiceTranscriptionUpstreamBodyTooLargeError({
+          maxBytes: UPSTREAM_BODY_MAX_BYTES,
+        });
+      }
+      text += decoder.decode(chunk, { stream: true });
+      return Effect.void;
+    });
+    return text + decoder.decode();
+  });
+
+  const readUpstreamCause = Effect.fn("VoiceTranscription.readUpstreamCause")(function* (
+    response: HttpClientResponse.HttpClientResponse,
+    apiKey: string,
+  ) {
+    const body = yield* readUpstreamText(response).pipe(Effect.option);
+    const reported = Option.getOrUndefined(Option.flatMap(body, decodeUpstreamError));
+    if (reported === undefined) return undefined;
+    const message = typeof reported.error === "string" ? reported.error : reported.error.message;
+    const redacted = apiKey ? message.replaceAll(apiKey, "[key]") : message;
+    return new Error(redacted.slice(0, UPSTREAM_MESSAGE_MAX_LENGTH));
+  });
 
   const createUploadUrl = Effect.fn("VoiceTranscription.createUploadUrl")(function* (
     input: VoiceTranscriptionCreateUrlInput,
   ) {
-    const endpoint = yield* loadEndpoint;
-    if (!endpoint.acceptedMimeTypes.includes(input.mimeType)) {
-      return yield* new VoiceTranscriptionNotConfiguredError({
-        message: unsupportedFormatMessage(endpoint.name, input.mimeType),
-      });
-    }
-    const secret = yield* signingSecret.pipe(
-      Effect.mapError((cause) => new VoiceTranscriptionSigningKeyError({ cause })),
-    );
+    yield* loadEndpoint(input.mimeType);
+    const secret = yield* signingSecret;
     const expiresAt = (yield* Clock.currentTimeMillis) + VOICE_TRANSCRIPTION_URL_TTL_MS;
     const encodedPayload = base64UrlEncode(
       encodeClaims({
         version: 1,
         kind: "voice-transcription",
+        nonce: yield* crypto.randomUUIDv4().pipe(Effect.orDie),
         mimeType: input.mimeType,
         sizeBytes: input.sizeBytes,
         expiresAt,
@@ -357,16 +380,8 @@ const make = Effect.gen(function* () {
     if (!encodedPayload || !signature || unexpectedSegment !== undefined) {
       return Option.none();
     }
-    const secret = yield* signingSecret.pipe(
-      Effect.tapError((cause) =>
-        Effect.logError("Failed to load the voice transcription signing key.", { cause }),
-      ),
-      Effect.option,
-    );
-    if (
-      Option.isNone(secret) ||
-      !timingSafeEqualBase64Url(signature, signPayload(encodedPayload, secret.value))
-    ) {
+    const secret = yield* signingSecret;
+    if (!timingSafeEqualBase64Url(signature, signPayload(encodedPayload, secret))) {
       return Option.none();
     }
     const claims = Option.flatMap(
@@ -374,7 +389,14 @@ const make = Effect.gen(function* () {
       decodeClaims,
     );
     const nowMs = yield* Clock.currentTimeMillis;
-    return Option.filter(claims, (decoded) => decoded.expiresAt > nowMs);
+    if (Option.isNone(claims) || claims.value.expiresAt <= nowMs) return Option.none();
+    const firstUse = yield* Ref.modify(consumedSignatures, (consumed) => {
+      const live = new Map([...consumed].filter(([, expiresAt]) => expiresAt > nowMs));
+      if (live.has(signature)) return [false, live];
+      live.set(signature, claims.value.expiresAt);
+      return [true, live];
+    });
+    return firstUse ? claims : Option.none();
   });
 
   const transcribe = Effect.fn("VoiceTranscription.transcribe")(function* (
@@ -387,16 +409,18 @@ const make = Effect.gen(function* () {
         receivedBytes: audio.byteLength,
       });
     }
-    const endpoint = yield* loadEndpoint;
-    // The provider can change between minting and uploading.
-    if (!endpoint.acceptedMimeTypes.includes(claims.mimeType)) {
-      return yield* new VoiceTranscriptionUnsupportedFormatError({
-        providerName: endpoint.name,
-        mimeType: claims.mimeType,
-      });
-    }
+    const endpoint = yield* loadEndpoint(claims.mimeType);
     if (endpoint.kind === "apple") {
-      const { text } = yield* appleSpeech.transcribe({ audio, locale: endpoint.language });
+      const { text } = yield* appleSpeech.transcribe({ audio, locale: endpoint.language }).pipe(
+        Effect.catchTags({
+          AppleSpeechUnsupportedLocaleError: ({ locale }) =>
+            new VoiceTranscriptionNotConfiguredError({
+              reason: "unsupported-locale",
+              providerName: endpoint.name,
+              locale,
+            }),
+        }),
+      );
       return { text } satisfies VoiceTranscriptionResult;
     }
     const upstreamError = (
@@ -420,22 +444,20 @@ const make = Effect.gen(function* () {
         .execute(request)
         .pipe(Effect.mapError((cause) => upstreamError({ stage: "request", cause })));
       if (response.status === 401 || response.status === 403) {
-        const upstreamMessage = yield* readUpstreamMessage(response, endpoint);
         return yield* new VoiceTranscriptionCredentialsRejectedError({
           host: endpoint.host,
           status: response.status,
-          ...(upstreamMessage ? { upstreamMessage } : {}),
+          cause: yield* readUpstreamCause(response, endpoint.apiKey),
         });
       }
       if (response.status < 200 || response.status >= 300) {
-        const upstreamMessage = yield* readUpstreamMessage(response, endpoint);
         return yield* upstreamError({
           stage: "status",
           status: response.status,
-          ...(upstreamMessage ? { upstreamMessage } : {}),
+          cause: yield* readUpstreamCause(response, endpoint.apiKey),
         });
       }
-      const { text } = yield* response.json.pipe(
+      const { text } = yield* readUpstreamText(response).pipe(
         Effect.flatMap(decodeTranscript),
         Effect.mapError((cause) => upstreamError({ stage: "response", cause })),
       );

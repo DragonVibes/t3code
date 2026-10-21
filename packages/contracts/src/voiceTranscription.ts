@@ -42,6 +42,7 @@ export const VoiceTranscriptionFailureCode = Schema.Literals([
   "invalid_upload",
   "upstream_rejected_credentials",
   "upstream_failed",
+  "internal",
 ]);
 export type VoiceTranscriptionFailureCode = typeof VoiceTranscriptionFailureCode.Type;
 
@@ -52,20 +53,68 @@ export const VoiceTranscriptionFailure = Schema.Struct({
 });
 export type VoiceTranscriptionFailure = typeof VoiceTranscriptionFailure.Type;
 
+export const VoiceTranscriptionNotConfiguredReason = Schema.Literals([
+  "disabled",
+  "missing-base-url",
+  "missing-model",
+  "missing-api-key",
+  "invalid-base-url",
+  "insecure-base-url",
+  "apple-unsupported-host",
+  "apple-unavailable",
+  "unsupported-format",
+  "unsupported-locale",
+]);
+export type VoiceTranscriptionNotConfiguredReason =
+  typeof VoiceTranscriptionNotConfiguredReason.Type;
+
 export class VoiceTranscriptionNotConfiguredError extends Schema.TaggedError<VoiceTranscriptionNotConfiguredError>()(
   "VoiceTranscriptionNotConfiguredError",
   {
-    message: Schema.String,
+    reason: VoiceTranscriptionNotConfiguredReason,
+    providerName: Schema.String,
+    mimeType: Schema.optional(VoiceTranscriptionAudioMimeType),
+    locale: Schema.optional(Schema.String),
   },
-) {}
+) {
+  override get message(): string {
+    switch (this.reason) {
+      case "disabled":
+        return "Voice transcription is turned off for this environment.";
+      case "missing-base-url":
+        return "Voice transcription needs an endpoint URL.";
+      case "missing-model":
+        return "Voice transcription needs a model name.";
+      case "missing-api-key":
+        return `Add an ${this.providerName} API key to use voice transcription.`;
+      case "invalid-base-url":
+        return "The voice transcription endpoint URL is not valid.";
+      case "insecure-base-url":
+        return "Voice transcription sends an API key only over https, unless the endpoint is on this machine or a private network.";
+      case "apple-unsupported-host":
+        return "Apple on-device transcription needs macOS 26 or later on the machine running T3 Code.";
+      case "apple-unavailable":
+        return "Apple on-device transcription is unavailable on the machine running T3 Code.";
+      case "unsupported-format":
+        return this.mimeType
+          ? `${this.providerName} does not accept ${this.mimeType} recordings.`
+          : `${this.providerName} does not accept this recording format.`;
+      case "unsupported-locale":
+        return this.locale
+          ? `${this.providerName} does not support the language '${this.locale}'.`
+          : `${this.providerName} does not support this Mac's system language.`;
+    }
+  }
+}
 
-export class VoiceTranscriptionSigningKeyError extends Schema.TaggedError<VoiceTranscriptionSigningKeyError>()(
-  "VoiceTranscriptionSigningKeyError",
+export class VoiceTranscriptionInternalError extends Schema.TaggedError<VoiceTranscriptionInternalError>()(
+  "VoiceTranscriptionInternalError",
   {
+    stage: Schema.Literals(["read-settings", "load-signing-key"]),
     cause: Schema.Defect(),
   },
 ) {
   override get message(): string {
-    return "Failed to load the voice transcription signing key.";
+    return "Voice transcription hit a server error.";
   }
 }

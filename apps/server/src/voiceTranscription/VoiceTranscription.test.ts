@@ -1,19 +1,22 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import type {
-  VoiceTranscriptionAudioMimeType,
-  VoiceTranscriptionSettings,
+import {
+  ServerSettingsError,
+  type VoiceTranscriptionAudioMimeType,
+  type VoiceTranscriptionSettings,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import {
   HttpClient,
   type HttpClientRequest,
   HttpClientResponse,
+  HttpMiddleware,
   HttpRouter,
   HttpServerRequest,
   HttpServerResponse,
@@ -29,20 +32,32 @@ import * as VoiceTranscription from "./VoiceTranscription.ts";
 
 const audio = new Uint8Array([1, 2, 3, 4, 5, 6]);
 
-const appleSpeechUnavailable = AppleSpeechHelper.AppleSpeechHelper.of({
-  available: Effect.succeed(false),
-  transcribe: () => Effect.die("the Apple speech helper is unavailable"),
-});
+const appleSpeechWith = (
+  availability: AppleSpeechHelper.AppleSpeechAvailability,
+  transcribe: AppleSpeechHelper.AppleSpeechHelper["Service"]["transcribe"] = () =>
+    Effect.die("the Apple speech helper is unavailable"),
+) =>
+  AppleSpeechHelper.AppleSpeechHelper.of({
+    available: Effect.succeed(availability === "available"),
+    availability: Effect.succeed(availability),
+    transcribe,
+  });
+
+const appleSpeechUnavailable = appleSpeechWith("unsupported-host");
 
 const appleSpeechAvailable = (
   transcribe: AppleSpeechHelper.AppleSpeechHelper["Service"]["transcribe"],
-) => AppleSpeechHelper.AppleSpeechHelper.of({ available: Effect.succeed(true), transcribe });
+) => appleSpeechWith("available", transcribe);
 
 function setup(
   settings: Partial<VoiceTranscriptionSettings>,
   upstream: (request: HttpClientRequest.HttpClientRequest) => Effect.Effect<Response> = () =>
     Effect.succeed(Response.json({ text: "hello world" })),
   appleSpeech = appleSpeechUnavailable,
+  overrides: {
+    readonly settingsService?: Layer.Layer<ServerSettings.ServerSettingsService>;
+    readonly secretStore?: Layer.Layer<ServerSecretStore.ServerSecretStore>;
+  } = {},
 ) {
   const requests: Array<HttpClientRequest.HttpClientRequest> = [];
   const client = HttpClient.make((request) =>
@@ -53,13 +68,14 @@ function setup(
   );
   const layer = VoiceTranscription.layer.pipe(
     Layer.provideMerge(
-      ServerSettings.layerTest({
-        voiceTranscription: { enabled: true, apiKey: "sk-test", ...settings },
-      }),
+      overrides.settingsService ??
+        ServerSettings.layerTest({
+          voiceTranscription: { enabled: true, apiKey: "sk-test", ...settings },
+        }),
     ),
     Layer.provide(Layer.succeed(HttpClient.HttpClient, client)),
     Layer.provide(Layer.succeed(AppleSpeechHelper.AppleSpeechHelper, appleSpeech)),
-    Layer.provideMerge(ServerSecretStore.layer),
+    Layer.provideMerge(overrides.secretStore ?? ServerSecretStore.layer),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-voice-test-" })),
     Layer.provideMerge(NodeServices.layer),
   );
@@ -83,7 +99,7 @@ const apple = { provider: "apple-on-device", baseUrl: "", model: "", apiKey: "" 
 
 const post = (
   relativeUrl: string,
-  options: { readonly body?: Uint8Array; readonly contentLength?: number } = {},
+  options: { readonly body?: Uint8Array; readonly contentLength?: number | null } = {},
 ) =>
   Effect.gen(function* () {
     const body = options.body ?? audio;
@@ -93,7 +109,9 @@ const post = (
       body: new Blob([new Uint8Array(body)]),
       headers: {
         "content-type": "audio/webm",
-        "content-length": String(options.contentLength ?? body.byteLength),
+        ...(options.contentLength === null
+          ? {}
+          : { "content-length": String(options.contentLength ?? body.byteLength) }),
       },
     });
     const response = HttpServerResponse.toWeb(
@@ -134,6 +152,7 @@ describe("VoiceTranscription", () => {
           Effect.succeedSome({
             version: 1,
             kind: "voice-transcription",
+            nonce: "nonce",
             mimeType: "audio/webm",
             sizeBytes: audio.byteLength,
             expiresAt: Number.MAX_SAFE_INTEGER,
@@ -183,11 +202,22 @@ describe("VoiceTranscription", () => {
     { settings: { ...xai, apiKey: "" }, message: "xAI API key" },
     { settings: xai, message: "xAI does not accept audio/webm recordings." },
     { settings: apple, message: "Apple on-device transcription needs macOS 26 or later" },
+    {
+      settings: apple,
+      appleSpeech: appleSpeechWith("unavailable"),
+      message: "Apple on-device transcription is unavailable on the machine running T3 Code.",
+    },
     { settings: { model: "" }, message: "model name" },
     { settings: { baseUrl: "" }, message: "endpoint URL" },
     { settings: { baseUrl: "ftp://whisper.local" }, message: "not valid" },
-  ] as const)("refuses to mint an upload URL when $message", ({ settings, message }) => {
-    const { layer } = setup(settings);
+    { settings: { baseUrl: "http://api.example.com/v1" }, message: "only over https" },
+  ] as const)("refuses to mint an upload URL when $message", (expected) => {
+    const { settings, message } = expected;
+    const { layer } = setup(
+      settings,
+      undefined,
+      "appleSpeech" in expected ? expected.appleSpeech : undefined,
+    );
     return Effect.gen(function* () {
       const error = yield* Effect.flip(mint);
       expect(error._tag).toBe("VoiceTranscriptionNotConfiguredError");
@@ -221,6 +251,27 @@ describe("VoiceTranscription", () => {
       expect(file.name).toBe("audio.webm");
       expect(file.type).toBe("audio/webm");
       expect(new Uint8Array(yield* Effect.promise(() => file.arrayBuffer()))).toEqual(audio);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect.each([
+    { baseUrl: "http://localhost:8080/v1", apiKey: "sk-test" },
+    { baseUrl: "http://127.0.0.2:8080/v1", apiKey: "sk-test" },
+    { baseUrl: "http://[::1]:8080/v1", apiKey: "sk-test" },
+    { baseUrl: "http://192.168.1.20/v1", apiKey: "sk-test" },
+    { baseUrl: "http://10.0.0.5/v1", apiKey: "sk-test" },
+    { baseUrl: "http://172.20.0.5/v1", apiKey: "sk-test" },
+    { baseUrl: "http://169.254.10.1/v1", apiKey: "sk-test" },
+    { baseUrl: "http://[fd12::5]/v1", apiKey: "sk-test" },
+    { baseUrl: "http://gpu-box.local/v1", apiKey: "sk-test" },
+    { baseUrl: "http://api.example.com/v1", apiKey: "" },
+  ])("allows http to a private endpoint, or anywhere without a key: $baseUrl", (settings) => {
+    const { layer, requests } = setup({ ...settings, model: "whisper-1" });
+    return Effect.gen(function* () {
+      expect((yield* post((yield* mint).relativeUrl)).status).toBe(200);
+      expect(requests[0]!.headers.authorization).toBe(
+        settings.apiKey ? `Bearer ${settings.apiKey}` : undefined,
+      );
     }).pipe(Effect.provide(layer));
   });
 
@@ -343,11 +394,11 @@ describe("VoiceTranscription", () => {
     return Effect.gen(function* () {
       const issued = yield* mint;
       const settings = yield* ServerSettings.ServerSettingsService;
-      yield* settings.updateSettings({ voiceTranscription: xai });
+      yield* settings.updateSettings({ voiceTranscription: { ...xai, apiKey: "sk-xai" } });
       const response = yield* post(issued.relativeUrl);
       expect(response).toEqual({
-        status: 400,
-        body: { code: "invalid_upload", message: "xAI does not accept audio/webm recordings." },
+        status: 409,
+        body: { code: "not_configured", message: "xAI does not accept audio/webm recordings." },
       });
       expect(requests).toHaveLength(0);
     }).pipe(Effect.provide(layer));
@@ -360,36 +411,116 @@ describe("VoiceTranscription", () => {
         { status: 401 },
       ),
       code: "upstream_rejected_credentials",
-      message: "api.openai.com rejected the API key (HTTP 401): Incorrect API key provided: [key].",
+      message: "The transcription service at api.openai.com rejected the API key (HTTP 401).",
+      cause: "Incorrect API key provided: [key].",
     },
     {
       upstream: Response.json({ error: "model not loaded" }, { status: 500 }),
       code: "upstream_failed",
-      message: "api.openai.com answered HTTP 500: model not loaded",
+      message: "The transcription service at api.openai.com answered HTTP 500.",
+      cause: "model not loaded",
     },
     {
       upstream: new Response("<html>bad gateway</html>", { status: 503 }),
       code: "upstream_failed",
-      message: "api.openai.com answered HTTP 503.",
+      message: "The transcription service at api.openai.com answered HTTP 503.",
+      cause: undefined,
     },
     {
       upstream: Response.json({ transcript: "wrong shape" }),
       code: "upstream_failed",
-      message: "api.openai.com returned an unexpected response.",
+      message: "The transcription service at api.openai.com returned an unexpected response.",
+      cause: undefined,
     },
   ])(
     "answers $code with a 502 for upstream HTTP $upstream.status",
-    ({ upstream, code, message }) => {
-      const { layer } = setup({}, () => Effect.succeed(upstream));
+    ({ upstream, code, message, cause }) => {
+      const { layer } = setup({}, () => Effect.succeed(upstream.clone()));
       return Effect.gen(function* () {
         const response = yield* post((yield* mint).relativeUrl);
-        expect(response.status).toBe(502);
-        expect(response.body.code).toBe(code);
-        expect(response.body.message).toContain(message);
-        expect(JSON.stringify(response.body)).not.toContain("sk-test");
+        expect(response).toEqual({ status: 502, body: { code, message } });
+
+        const voice = yield* VoiceTranscription.VoiceTranscription;
+        const token = (yield* mint).relativeUrl.split("/").at(-1)!;
+        const claims = Option.getOrThrow(yield* voice.verifyUploadToken(token));
+        const error = yield* Effect.flip(voice.transcribe(claims, audio));
+        if (cause !== undefined) {
+          expect(error.cause).toBeInstanceOf(Error);
+          expect((error.cause as Error).message).toBe(cause);
+        }
       }).pipe(Effect.provide(layer));
     },
   );
+
+  it.effect.each([200, 500])("stops reading an upstream HTTP %s body past 1 MiB", (status) => {
+    const chunk = new Uint8Array(64 * 1024).fill(0x61);
+    let sentBytes = 0;
+    const { layer } = setup({}, () =>
+      Effect.succeed(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull: (controller) => {
+              if (sentBytes > 2 * 1024 * 1024) return new Promise<void>(() => {});
+              sentBytes += chunk.byteLength;
+              controller.enqueue(chunk);
+            },
+          }),
+          { status },
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      const response = yield* post((yield* mint).relativeUrl);
+      expect(response).toEqual({
+        status: 502,
+        body: {
+          code: "upstream_failed",
+          message:
+            status === 200
+              ? "The transcription service at api.openai.com returned an unexpected response."
+              : "The transcription service at api.openai.com answered HTTP 500.",
+        },
+      });
+      expect(sentBytes).toBeLessThan(2 * 1024 * 1024);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("answers internal when the settings cannot be read", () => {
+    const { layer } = setup({}, undefined, undefined, {
+      settingsService: Layer.mock(ServerSettings.ServerSettingsService)({
+        getSettings: Effect.fail(
+          new ServerSettingsError({ settingsPath: "settings.json", operation: "read-file" }),
+        ),
+      }),
+    });
+    return Effect.gen(function* () {
+      const error = yield* Effect.flip(mint);
+      expect(error._tag).toBe("VoiceTranscriptionInternalError");
+      expect(error.message).toBe("Voice transcription hit a server error.");
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("answers internal instead of an invalid link when the signing key cannot load", () => {
+    const { layer, requests } = setup({}, undefined, undefined, {
+      secretStore: Layer.mock(ServerSecretStore.ServerSecretStore)({
+        getOrCreateRandom: () =>
+          Effect.fail(
+            new ServerSecretStore.SecretStoreReadError({
+              resource: "upload signing key",
+              cause: new Error("disk unreadable"),
+            }),
+          ),
+      }),
+    });
+    return Effect.gen(function* () {
+      const response = yield* post("/api/voice/transcriptions/payload.signature");
+      expect(response).toEqual({
+        status: 500,
+        body: { code: "internal", message: "Voice transcription hit a server error." },
+      });
+      expect(requests).toHaveLength(0);
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect("answers upstream_failed when the service does not answer in time", () =>
     Effect.gen(function* () {
@@ -416,7 +547,6 @@ describe("VoiceTranscription", () => {
     () => {
       const { layer, requests } = setup({});
       return Effect.gen(function* () {
-        const issued = yield* mint;
         const attachment = yield* issueAttachmentUploadUrl({
           type: "file",
           name: "audio.webm",
@@ -425,16 +555,17 @@ describe("VoiceTranscription", () => {
         });
         const attachmentToken = attachment.relativeUrl.split("/").at(-1)!;
         const rejected = [
-          yield* post(`${issued.relativeUrl}x`),
+          yield* post(`${(yield* mint).relativeUrl}x`),
           yield* post(`/api/voice/transcriptions/${attachmentToken}`),
-          yield* post(issued.relativeUrl, { contentLength: audio.byteLength + 1 }),
-          yield* post(issued.relativeUrl, {
+          yield* post((yield* mint).relativeUrl, { contentLength: audio.byteLength + 1 }),
+          yield* post((yield* mint).relativeUrl, {
             body: audio.slice(1),
             contentLength: audio.byteLength - 1,
           }),
         ];
+        const expiring = yield* mint;
         yield* TestClock.adjust("2 minutes");
-        rejected.push(yield* post(issued.relativeUrl));
+        rejected.push(yield* post(expiring.relativeUrl));
 
         for (const response of rejected) {
           expect(response.status).toBe(400);
@@ -443,6 +574,69 @@ describe("VoiceTranscription", () => {
         expect(requests).toHaveLength(0);
       }).pipe(Effect.provide(layer));
     },
+  );
+
+  it.effect("accepts a re-chunked upload without Content-Length but still checks its size", () => {
+    const { layer, requests } = setup({});
+    return Effect.gen(function* () {
+      expect(yield* post((yield* mint).relativeUrl, { contentLength: null })).toEqual({
+        status: 200,
+        body: { text: "hello world" },
+      });
+      const longer = yield* post((yield* mint).relativeUrl, {
+        body: new Uint8Array([...audio, 7]),
+        contentLength: null,
+      });
+      const shorter = yield* post((yield* mint).relativeUrl, {
+        body: audio.slice(1),
+        contentLength: null,
+      });
+      for (const response of [longer, shorter]) {
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe("invalid_upload");
+      }
+      expect(requests).toHaveLength(1);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("accepts each upload link once", () => {
+    const { layer, requests } = setup({});
+    return Effect.gen(function* () {
+      const issued = yield* mint;
+      expect((yield* post(issued.relativeUrl)).status).toBe(200);
+      expect(yield* post(issued.relativeUrl)).toEqual({
+        status: 400,
+        body: {
+          code: "invalid_upload",
+          message: "This transcription link is invalid or has expired.",
+        },
+      });
+      expect((yield* post((yield* mint).relativeUrl)).status).toBe(200);
+      expect(requests).toHaveLength(2);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("keeps upload links out of traces", () =>
+    Effect.gen(function* () {
+      const traced = yield* Deferred.make<(path: string) => boolean>();
+      yield* Layer.build(
+        ServerHttp.withUntracedRequests(
+          Layer.effectDiscard(
+            Effect.gen(function* () {
+              const disabled = yield* HttpMiddleware.TracerDisabledWhen;
+              yield* Deferred.succeed(
+                traced,
+                (path) =>
+                  !disabled(HttpServerRequest.fromWeb(new Request(`http://t3.test${path}`))),
+              );
+            }),
+          ),
+        ),
+      );
+      const isTraced = yield* Deferred.await(traced);
+      expect(isTraced("/api/voice/transcriptions/payload.signature")).toBe(false);
+      expect(isTraced("/api/attachments/upload/payload.signature")).toBe(true);
+    }).pipe(Effect.scoped),
   );
 
   it.effect("answers not_configured when transcription is turned off after minting", () => {

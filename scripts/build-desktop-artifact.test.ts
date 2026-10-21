@@ -524,6 +524,41 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
+  it.effect.each(["15.5", "26.0"])(
+    "stages the Apple speech helper on mac only with a macOS 26 SDK (SDK %s)",
+    (sdkVersion) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const stageResourcesDir = yield* fs.makeTempDirectoryScoped({
+            prefix: "t3-apple-speech-sdk-",
+          });
+          const commands: Array<string> = [];
+          yield* stageAppleSpeechHelper({
+            repoRoot: stageResourcesDir,
+            stageResourcesDir,
+            platform: "mac",
+            arch: "arm64",
+            verbose: false,
+          }).pipe(
+            Effect.provideService(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make((command) => {
+                const { command: name, args } = command as unknown as {
+                  readonly command: string;
+                  readonly args: ReadonlyArray<string>;
+                };
+                commands.push([name, ...args].join(" "));
+                return Effect.succeed(mockProcess(0, name === "xcrun" ? `${sdkVersion}\n` : ""));
+              }),
+            ),
+          );
+          const builds = commands.filter((command) => command.includes("build.mjs"));
+          assert.lengthOf(builds, sdkVersion === "26.0" ? 1 : 0);
+        }),
+      ),
+  );
+
   it.effect("omits update feeds for pull request preview builds", () =>
     Effect.gen(function* () {
       const preview = yield* createBuildConfig(
