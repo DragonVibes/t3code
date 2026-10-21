@@ -11,6 +11,7 @@ import {
 } from "@t3tools/client-runtime/voice-input";
 
 import { connectionAtomRuntime } from "../connection/runtime";
+import { convertRecordingToWav } from "../lib/voiceWav";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readEnvironmentScope, readPreparedConnection } from "./session";
 
@@ -44,5 +45,6 @@ export function createWebVoiceTranscriber(
       return connection ? resolveAssetUrl(connection.httpBaseUrl, relativeUrl) : null;
     },
     fetch: (input, init) => fetch(input, init),
+    prepareAudio: convertRecordingToWav,
   });
 }

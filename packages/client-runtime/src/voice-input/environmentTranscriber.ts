@@ -27,6 +27,8 @@ export type EnvironmentVoiceTranscriberDependencies = {
   /** Null when the environment has no reachable HTTP base, such as while disconnected. */
   readonly resolveUrl: (relativeUrl: string) => string | null;
   readonly fetch: typeof globalThis.fetch;
+  /** Re-encodes the recording before upload, such as to the WAV every provider accepts. */
+  readonly prepareAudio?: (recording: Blob) => Promise<Blob>;
 };
 
 const decodeMimeType = Schema.decodeUnknownOption(VoiceTranscriptionAudioMimeType);
@@ -93,6 +95,18 @@ export function createEnvironmentVoiceTranscriber(
       );
     }
     throwIfVoiceTranscriptionAborted(signal);
+    if (dependencies.prepareAudio && blob.size > 0) {
+      try {
+        blob = await dependencies.prepareAudio(blob);
+      } catch (error) {
+        throw new VoiceTranscriptionError(
+          "transcription-failed",
+          "Could not convert the recording for upload.",
+          { cause: error },
+        );
+      }
+      throwIfVoiceTranscriptionAborted(signal);
+    }
 
     const mimeType = containerMimeType(blob.type);
     if (!mimeType) {

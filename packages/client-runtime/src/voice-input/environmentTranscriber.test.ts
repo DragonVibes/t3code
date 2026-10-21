@@ -16,6 +16,7 @@ function createHarness(options: {
   readonly post?: PostResponse | ((init: RequestInit) => Promise<Response>);
   readonly createTranscriptionUrl?: EnvironmentVoiceTranscriberDependencies["createTranscriptionUrl"];
   readonly resolveUrl?: EnvironmentVoiceTranscriberDependencies["resolveUrl"];
+  readonly prepareAudio?: EnvironmentVoiceTranscriberDependencies["prepareAudio"];
 }) {
   const audio = options.audio ?? new Blob(["audio-bytes"], { type: "audio/webm;codecs=opus" });
   const posts: Array<{ url: string; init: RequestInit }> = [];
@@ -42,6 +43,7 @@ function createHarness(options: {
       }),
     resolveUrl: options.resolveUrl ?? ((relativeUrl) => `https://env.example${relativeUrl}`),
     fetch: fetch as unknown as typeof globalThis.fetch,
+    ...(options.prepareAudio ? { prepareAudio: options.prepareAudio } : {}),
   });
   return { transcriber, posts, mintInputs };
 }
@@ -75,6 +77,26 @@ describe("createEnvironmentVoiceTranscriber", () => {
     expect(post?.init.method).toBe("POST");
     expect(post?.init.headers).toEqual({ "content-type": "audio/webm" });
     expect(await new Response(post?.init.body as Blob).text()).toBe("audio-bytes");
+  });
+
+  it("uploads the prepared audio in place of the raw recording", async () => {
+    const harness = createHarness({
+      prepareAudio: async (recording) =>
+        new Blob([`wav:${await recording.text()}`], { type: "audio/wav" }),
+    });
+    await expect(transcribe(harness)).resolves.toBe("hello world");
+    expect(harness.mintInputs).toEqual([{ mimeType: "audio/wav", sizeBytes: 15 }]);
+    expect(harness.posts[0]?.init.headers).toEqual({ "content-type": "audio/wav" });
+    expect(await new Response(harness.posts[0]?.init.body as Blob).text()).toBe("wav:audio-bytes");
+
+    const broken = createHarness({
+      prepareAudio: async () => {
+        throw new Error("decode failed");
+      },
+    });
+    const error = await transcriptionError(transcribe(broken));
+    expect(error.code).toBe("transcription-failed");
+    expect(broken.mintInputs).toHaveLength(0);
   });
 
   it("uses the configured language as the locale and falls back to the device locale", async () => {

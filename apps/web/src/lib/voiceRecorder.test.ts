@@ -175,7 +175,7 @@ describe("createWebVoiceRecorder", () => {
       getUserMedia: refusal("SecurityError"),
       queryMicrophonePermission: async () => null,
     });
-    expect(await insecure.web.requestPermission()).toEqual({ granted: false, canAskAgain: true });
+    expect(await insecure.web.requestPermission()).toEqual({ granted: false, canAskAgain: false });
 
     const broken = createHarness({
       getUserMedia: async () => {

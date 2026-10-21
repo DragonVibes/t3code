@@ -59,7 +59,7 @@ function stopTracks(stream: MediaStream | null): void {
   for (const track of stream?.getTracks() ?? []) track.stop();
 }
 
-function isPermissionRefusal(error: unknown): boolean {
+function isPermissionRefusal(error: unknown): error is DOMException {
   return (
     error instanceof DOMException &&
     (error.name === "NotAllowedError" || error.name === "SecurityError")
@@ -167,9 +167,11 @@ export function createWebVoiceRecorder(
         return { granted: true, canAskAgain: true };
       } catch (error) {
         if (!isPermissionRefusal(error)) throw error;
-        const state = environment.denialIsPermanent
-          ? "denied"
-          : await environment.queryMicrophonePermission();
+        // A SecurityError means the origin itself cannot ask, so retrying cannot help.
+        const state =
+          environment.denialIsPermanent || error.name === "SecurityError"
+            ? "denied"
+            : await environment.queryMicrophonePermission();
         return { granted: false, canAskAgain: state !== "denied" };
       }
     },
