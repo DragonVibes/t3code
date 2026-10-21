@@ -12,7 +12,9 @@ export {
 } from "./controller.ts";
 export {
   createEnvironmentVoiceTranscriber,
+  voiceTranscriptionUnavailableReason,
   type EnvironmentVoiceTranscriberDependencies,
+  type VoiceTranscriptionConfiguration,
 } from "./environmentTranscriber.ts";
 export {
   normalizeVoiceInputDecibels,

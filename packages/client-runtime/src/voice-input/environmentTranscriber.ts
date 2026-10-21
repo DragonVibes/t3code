@@ -1,10 +1,13 @@
 import {
   VOICE_TRANSCRIPTION_MAX_AUDIO_BYTES,
+  VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS,
   VoiceTranscriptionAudioMimeType,
   VoiceTranscriptionFailure,
   VoiceTranscriptionResult,
+  type HttpVoiceTranscriptionProvider,
   type VoiceTranscriptionCreateUrlInput,
   type VoiceTranscriptionCreateUrlResult,
+  type VoiceTranscriptionSettings,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -15,11 +18,20 @@ import {
   type VoiceTranscriber,
 } from "./transcription.ts";
 
+/** What the environment already told the client about its transcription setup. */
+export type VoiceTranscriptionConfiguration = {
+  /** `apiKey` arrives redacted; only its presence is meaningful. */
+  readonly settings: VoiceTranscriptionSettings;
+  readonly appleOnDeviceTranscription: boolean;
+};
+
 export type EnvironmentVoiceTranscriberDependencies = {
   /** Configured ISO-639-1 code. Empty lets the model detect the language. */
   readonly language: () => string;
   /** Locale used for transcript spacing when no language is configured. */
   readonly fallbackLocale: () => string;
+  /** Null while the environment's config is unknown, in which case the server decides. */
+  readonly readConfiguration: () => VoiceTranscriptionConfiguration | null;
   /** Rejects with the RPC's tagged error when the environment refuses to mint a URL. */
   readonly createTranscriptionUrl: (
     input: VoiceTranscriptionCreateUrlInput,
@@ -34,17 +46,47 @@ const decodeMimeType = Schema.decodeUnknownOption(VoiceTranscriptionAudioMimeTyp
 const decodeResult = Schema.decodeUnknownOption(VoiceTranscriptionResult);
 const decodeFailure = Schema.decodeUnknownOption(VoiceTranscriptionFailure);
 
+const HOSTED_PROVIDER_NAMES: Record<HttpVoiceTranscriptionProvider, string> = {
+  "openai-compatible": "OpenAI",
+  xai: "xAI",
+};
+
+/**
+ * The checks the server runs before minting an upload URL, so a misconfigured
+ * environment fails before the microphone opens. Messages match the server's.
+ */
+export function voiceTranscriptionUnavailableReason({
+  settings,
+  appleOnDeviceTranscription,
+}: VoiceTranscriptionConfiguration): string | null {
+  if (!settings.enabled) return "Voice transcription is turned off for this environment.";
+  if (settings.provider === "apple-on-device") {
+    return appleOnDeviceTranscription
+      ? null
+      : "Apple on-device transcription needs macOS 26 or later on the machine running T3 Code.";
+  }
+  const hostedBaseUrl = VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS[settings.provider].baseUrl;
+  if (!settings.apiKey && settings.baseUrl.replace(/\/+$/, "") === hostedBaseUrl) {
+    return `Add an ${HOSTED_PROVIDER_NAMES[settings.provider]} API key to use voice transcription.`;
+  }
+  return null;
+}
+
 function containerMimeType(blobType: string): VoiceTranscriptionAudioMimeType | null {
   return Option.getOrNull(decodeMimeType(blobType.split(";")[0]?.trim().toLowerCase()));
 }
 
-function isNotConfiguredError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "_tag" in error &&
-    error._tag === "VoiceTranscriptionNotConfiguredError"
-  );
+function notConfiguredMessage(error: unknown): string | null {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("_tag" in error) ||
+    error._tag !== "VoiceTranscriptionNotConfiguredError"
+  ) {
+    return null;
+  }
+  const message = "message" in error && typeof error.message === "string" ? error.message : "";
+  return message.length > 0 ? message : "Voice input is not configured on this environment.";
 }
 
 function isAbortError(error: unknown): boolean {
@@ -55,12 +97,7 @@ function cancelledError(): VoiceTranscriptionError {
   return new VoiceTranscriptionError("cancelled", "Voice transcription was cancelled.");
 }
 
-/**
- * Settles as cancelled on abort even though the work continues. Minting a URL and
- * decoding audio hold no resource the controller owns, so a stuck RPC must not
- * block the next recording.
- */
-function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+function settleOnAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(cancelledError());
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(cancelledError());
@@ -109,7 +146,7 @@ export function createEnvironmentVoiceTranscriber(
     throwIfVoiceTranscriptionAborted(signal);
     if (dependencies.prepareAudio && blob.size > 0) {
       try {
-        blob = await abortable(dependencies.prepareAudio(blob), signal);
+        blob = await settleOnAbort(dependencies.prepareAudio(blob), signal);
       } catch (error) {
         if (error instanceof VoiceTranscriptionError) throw error;
         throw new VoiceTranscriptionError(
@@ -140,18 +177,15 @@ export function createEnvironmentVoiceTranscriber(
 
     let minted: VoiceTranscriptionCreateUrlResult;
     try {
-      minted = await abortable(
+      minted = await settleOnAbort(
         dependencies.createTranscriptionUrl({ mimeType, sizeBytes: blob.size }),
         signal,
       );
     } catch (error) {
       if (error instanceof VoiceTranscriptionError) throw error;
-      if (isNotConfiguredError(error)) {
-        throw new VoiceTranscriptionError(
-          "unavailable",
-          "Voice input is not configured on this environment.",
-          { cause: error },
-        );
+      const notConfigured = notConfiguredMessage(error);
+      if (notConfigured !== null) {
+        throw new VoiceTranscriptionError("unavailable", notConfigured, { cause: error });
       }
       throw new VoiceTranscriptionError(
         "transcription-failed",
@@ -207,6 +241,9 @@ export function createEnvironmentVoiceTranscriber(
   return {
     prepare: async ({ signal }) => {
       throwIfVoiceTranscriptionAborted(signal);
+      const configuration = dependencies.readConfiguration();
+      const unavailable = configuration && voiceTranscriptionUnavailableReason(configuration);
+      if (unavailable) throw new VoiceTranscriptionError("unavailable", unavailable);
       const language = dependencies.language().trim();
       return {
         locale: language.length > 0 ? language : dependencies.fallbackLocale(),

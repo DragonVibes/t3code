@@ -1,4 +1,9 @@
-/** Cancellation is cooperative: settle only after the underlying work has stopped. */
+/**
+ * Cancellation is cooperative. Work that holds a resource the controller owns, such as a
+ * native speech session or the recording file, settles only after that work has stopped.
+ * Work that holds nothing of the controller's, such as a URL mint or an in-memory decode,
+ * may settle as cancelled while it finishes in the background.
+ */
 export type VoiceTranscriptionOptions = {
   readonly signal: AbortSignal;
 };

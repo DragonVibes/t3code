@@ -13,6 +13,7 @@ import {
 import { connectionAtomRuntime } from "../connection/runtime";
 import { convertRecordingToWav } from "../lib/voiceWav";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { serverEnvironment } from "./server";
 import { readEnvironmentScope, readPreparedConnection } from "./session";
 
 export const voiceTranscriptionEnvironment = {
@@ -29,6 +30,16 @@ export function createWebVoiceTranscriber(
   return createEnvironmentVoiceTranscriber({
     language,
     fallbackLocale: () => navigator.language || "en-US",
+    readConfiguration: () => {
+      const config = appAtomRegistry.get(serverEnvironment.configValueAtom(environmentId));
+      return config
+        ? {
+            settings: config.settings.voiceTranscription,
+            appleOnDeviceTranscription:
+              config.environment.capabilities.appleOnDeviceTranscription === true,
+          }
+        : null;
+    },
     createTranscriptionUrl: async (input) => {
       const result = await runAtomCommand(
         appAtomRegistry,

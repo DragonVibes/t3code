@@ -2,17 +2,40 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   createEnvironmentVoiceTranscriber,
+  voiceTranscriptionUnavailableReason,
   type EnvironmentVoiceTranscriberDependencies,
+  type VoiceTranscriptionConfiguration,
 } from "./environmentTranscriber.ts";
 import { VoiceTranscriptionError } from "./transcription.ts";
 
 const RECORDING_URI = "blob:https://app.example/recording";
 
+const HOSTED_OPENAI: VoiceTranscriptionConfiguration = {
+  settings: {
+    enabled: true,
+    provider: "openai-compatible",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-transcribe",
+    language: "",
+    apiKey: "••••",
+  },
+  appleOnDeviceTranscription: false,
+};
+
 type PostResponse = { readonly status: number; readonly body: unknown };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function createHarness(options: {
   readonly audio?: Blob;
   readonly language?: string;
+  readonly configuration?: VoiceTranscriptionConfiguration | null;
   readonly post?: PostResponse | ((init: RequestInit) => Promise<Response>);
   readonly createTranscriptionUrl?: EnvironmentVoiceTranscriberDependencies["createTranscriptionUrl"];
   readonly resolveUrl?: EnvironmentVoiceTranscriberDependencies["resolveUrl"];
@@ -35,6 +58,8 @@ function createHarness(options: {
   const transcriber = createEnvironmentVoiceTranscriber({
     language: () => options.language ?? "",
     fallbackLocale: () => "fr-FR",
+    readConfiguration: () =>
+      options.configuration === undefined ? HOSTED_OPENAI : options.configuration,
     createTranscriptionUrl:
       options.createTranscriptionUrl ??
       (async (input) => {
@@ -132,17 +157,34 @@ describe("createEnvironmentVoiceTranscriber", () => {
     expect(opaque.code).toBe("transcription-failed");
   });
 
-  it("maps a refused URL mint to unavailable when the environment is not configured", async () => {
+  it("maps a refused URL mint to unavailable with the environment's own reason", async () => {
     const unconfigured = await transcriptionError(
       transcribe(
         createHarness({
           createTranscriptionUrl: async () => {
-            throw { _tag: "VoiceTranscriptionNotConfiguredError", message: "no key" };
+            throw {
+              _tag: "VoiceTranscriptionNotConfiguredError",
+              message: "Add an OpenAI API key to use voice transcription.",
+            };
           },
         }),
       ),
     );
-    expect(unconfigured.code).toBe("unavailable");
+    expect(unconfigured).toMatchObject({
+      code: "unavailable",
+      message: "Add an OpenAI API key to use voice transcription.",
+    });
+
+    const silent = await transcriptionError(
+      transcribe(
+        createHarness({
+          createTranscriptionUrl: async () => {
+            throw { _tag: "VoiceTranscriptionNotConfiguredError", message: "" };
+          },
+        }),
+      ),
+    );
+    expect(silent).toMatchObject({ code: "unavailable", message: expect.stringContaining("not") });
 
     const offline = await transcriptionError(
       transcribe(
@@ -163,6 +205,7 @@ describe("createEnvironmentVoiceTranscriber", () => {
 
   it("settles as cancelled only after the upload itself has been aborted", async () => {
     const controller = new AbortController();
+    const uploadEntered = deferred<void>();
     let uploadSettled = false;
     const harness = createHarness({
       post: (init) =>
@@ -173,10 +216,11 @@ describe("createEnvironmentVoiceTranscriber", () => {
               reject(new DOMException("aborted", "AbortError"));
             });
           });
+          uploadEntered.resolve(undefined);
         }),
     });
     const pending = transcribe(harness, controller.signal);
-    await vi.waitFor(() => expect(harness.posts).toHaveLength(1));
+    await uploadEntered.promise;
     controller.abort();
     const cancelled = await transcriptionError(pending);
     expect(cancelled.code).toBe("cancelled");
@@ -185,20 +229,55 @@ describe("createEnvironmentVoiceTranscriber", () => {
 
   it("settles as cancelled while a URL mint is still pending", async () => {
     const controller = new AbortController();
-    let mintSettled = false;
+    const mintEntered = deferred<void>();
     const harness = createHarness({
-      createTranscriptionUrl: () =>
-        new Promise(() => {
-          mintSettled = false;
-        }),
+      createTranscriptionUrl: () => {
+        mintEntered.resolve(undefined);
+        return new Promise(() => {});
+      },
     });
     const pending = transcribe(harness, controller.signal);
-    await Promise.resolve();
+    await mintEntered.promise;
     controller.abort();
     const cancelled = await transcriptionError(pending);
     expect(cancelled.code).toBe("cancelled");
-    expect(mintSettled).toBe(false);
     expect(harness.posts).toHaveLength(0);
+  });
+
+  it("refuses to prepare when the environment's own settings cannot transcribe", async () => {
+    const signal = new AbortController().signal;
+    const configured = (
+      settings: Partial<VoiceTranscriptionConfiguration["settings"]>,
+      appleOnDeviceTranscription = false,
+    ): VoiceTranscriptionConfiguration => ({
+      settings: { ...HOSTED_OPENAI.settings, ...settings },
+      appleOnDeviceTranscription,
+    });
+    const prepare = (configuration: VoiceTranscriptionConfiguration | null) =>
+      createHarness({ configuration }).transcriber.prepare({ signal });
+
+    const disabled = await transcriptionError(prepare(configured({ enabled: false })));
+    expect(disabled).toMatchObject({
+      code: "unavailable",
+      message: expect.stringContaining("off"),
+    });
+    const keyless = await transcriptionError(prepare(configured({ apiKey: "" })));
+    expect(keyless.message).toBe("Add an OpenAI API key to use voice transcription.");
+    const keylessXai = await transcriptionError(
+      prepare(configured({ provider: "xai", baseUrl: "https://api.x.ai/v1/", apiKey: "" })),
+    );
+    expect(keylessXai.message).toBe("Add an xAI API key to use voice transcription.");
+    const appleElsewhere = await transcriptionError(
+      prepare(configured({ provider: "apple-on-device" })),
+    );
+    expect(appleElsewhere.message).toContain("macOS 26");
+
+    await expect(prepare(configured({ provider: "apple-on-device" }, true))).resolves.toBeDefined();
+    await expect(
+      prepare(configured({ baseUrl: "http://127.0.0.1:8080/v1", apiKey: "" })),
+    ).resolves.toBeDefined();
+    await expect(prepare(null)).resolves.toBeDefined();
+    expect(voiceTranscriptionUnavailableReason(HOSTED_OPENAI)).toBeNull();
   });
 
   it.each([
