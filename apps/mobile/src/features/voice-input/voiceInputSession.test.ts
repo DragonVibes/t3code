@@ -29,16 +29,17 @@ function createSession() {
     locale: "en-US",
     transcribe: async () => "spoken text",
   }));
+  const deleteRecording = vi.fn();
   const session = new VoiceInputSession({
     recorder,
     getTranscriber: () => ({ prepare }),
     requestPermission: async () => ({ granted: true, canAskAgain: true }),
     configureRecording: async () => {},
     releaseRecording: vi.fn(async () => {}),
-    deleteRecording: vi.fn(),
+    deleteRecording,
     onStateChange: vi.fn(),
   });
-  return { session, recorder, prepare };
+  return { session, recorder, prepare, deleteRecording };
 }
 
 describe("global voice input", () => {
@@ -152,6 +153,22 @@ describe("global voice input", () => {
       expect(session.controller.currentState.error).toContain("draft changed");
     },
   );
+
+  it("deletes a recording whose transcription failed, since retry records anew", async () => {
+    const { session, recorder, prepare, deleteRecording } = createSession();
+    prepare.mockResolvedValueOnce({
+      locale: "en-US",
+      transcribe: async () => {
+        throw new Error("Upload failed");
+      },
+    });
+    await session.start(createTarget("first", () => "hello", vi.fn(), { start: 5, end: 5 }));
+    await session.controller.stop();
+
+    expect(session.controller.currentState.phase).toBe("error");
+    expect(session.controller.currentState.errorAction).not.toBe("retry-transcription");
+    expect(deleteRecording).toHaveBeenCalledWith(recorder.uri);
+  });
 
   it("finishes the original draft at the recording limit while it is off screen", async () => {
     const { session, recorder } = createSession();

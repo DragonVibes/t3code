@@ -60,6 +60,7 @@ function createHarness(
     configureRecording: async () => undefined,
     releaseRecording: async () => undefined,
     deleteRecording: (uri) => deleted.push(uri),
+    retainFailedRecordings: true,
     readDraft: () => currentDraft,
     commitDraft: (text, selection) => {
       commits.push({ text, selection });
@@ -210,6 +211,23 @@ describe("VoiceInputController", () => {
     expect(harness.controller.currentState.errorAction).toBe("retry-transcription");
     expect(harness.deleted).toEqual([]);
     harness.controller.cancel();
+    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
+  });
+
+  it("deletes a failed recording at once when the client does not retain it", async () => {
+    const harness = createHarness({
+      retainFailedRecordings: false,
+      getTranscriber: () => ({
+        prepare: async () =>
+          preparedTranscription(async () => {
+            throw new Error("Upload failed");
+          }),
+      }),
+    });
+    await harness.controller.start();
+    await harness.controller.stop();
+
+    expect(harness.controller.currentState).toMatchObject({ phase: "error", errorAction: "retry" });
     expect(harness.deleted).toEqual(["file:///voice.m4a"]);
   });
 

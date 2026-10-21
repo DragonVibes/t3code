@@ -47,9 +47,16 @@ export class VoiceInputSession {
   private target: VoiceInputTarget | null = null;
   private unsubscribe: (() => void) | null = null;
 
-  constructor(dependencies: Omit<VoiceInputControllerDependencies, "readDraft" | "commitDraft">) {
+  constructor(
+    dependencies: Omit<
+      VoiceInputControllerDependencies,
+      "readDraft" | "commitDraft" | "retainFailedRecordings"
+    >,
+  ) {
     this.controller = new VoiceInputController({
       ...dependencies,
+      // `retry()` records anew, so a kept recording could never be sent again.
+      retainFailedRecordings: false,
       onStateChange: (state) => {
         if (!voiceInputBlocksSubmission(state)) {
           this.unsubscribe?.();

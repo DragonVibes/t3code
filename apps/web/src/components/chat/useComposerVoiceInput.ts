@@ -100,6 +100,7 @@ function createRuntime(
     configureRecording: recorder.configureRecording,
     releaseRecording: recorder.releaseRecording,
     deleteRecording: recorder.deleteRecording,
+    retainFailedRecordings: true,
     readDraft: () => ({ ...latest.readDraft(), revision }),
     commitDraft: (text, selection) => {
       transcriptInserted = latest.commitDraft(text, selection);

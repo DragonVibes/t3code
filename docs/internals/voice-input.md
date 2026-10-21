@@ -41,10 +41,12 @@ after the upload. Preparation follows the permission request, and on web that
 request has already opened the microphone. Draft ownership, text, and
 revision are captured before recording and checked before insertion, so a late
 transcript cannot overwrite a draft that was edited or replaced; a draft that
-refuses the text, such as a choice-only agent question, counts as changed. A
-transcription that fails after the recording succeeded keeps the audio behind the
-`retry-transcription` error action until the user retries, dismisses, or starts
-over, so a failed upload does not cost the recording.
+refuses the text, such as a choice-only agent question, counts as changed. On web
+and desktop, a transcription that fails after the recording succeeded keeps the
+audio behind the `retry-transcription` error action until the user retries,
+dismisses, or starts over, so a failed upload does not cost the recording. Holding
+it is the client's opt-in, `retainFailedRecordings`. Mobile leaves it off, because
+its retry records anew and a kept file would only wait for the next start.
 
 Cancellation invalidates a result immediately, but resources stay owned until the
 underlying work settles. Apple's native transcription call cannot be interrupted

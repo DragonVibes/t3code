@@ -88,6 +88,7 @@ describe("createLazyVoiceRecorder", () => {
         configureRecording: async () => undefined,
         releaseRecording: async () => undefined,
         deleteRecording: (uri) => deleted.push(uri),
+        retainFailedRecordings: false,
         readDraft: () => ({
           ownerKey: "thread",
           text: "",
