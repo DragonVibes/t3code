@@ -778,17 +778,33 @@ export const AntigravitySettings = makeProviderSettingsSchema(
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 
-export const DEFAULT_VOICE_TRANSCRIPTION_BASE_URL = "https://api.openai.com/v1";
-export const DEFAULT_VOICE_TRANSCRIPTION_MODEL = "gpt-transcribe";
+/**
+ * `openai-compatible` posts to `<baseUrl>/audio/transcriptions` (OpenAI, Groq, a whisper.cpp
+ * server); `xai` posts to `<baseUrl>/stt`, whose form fields differ.
+ */
+export const VoiceTranscriptionProvider = Schema.Literals(["openai-compatible", "xai"]);
+export type VoiceTranscriptionProvider = typeof VoiceTranscriptionProvider.Type;
 
-/** Any OpenAI-compatible `/audio/transcriptions` endpoint: OpenAI, Groq, a whisper.cpp server. */
+/** A key is required whenever `baseUrl` is still the provider's hosted default. */
+export const VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS = {
+  "openai-compatible": { baseUrl: "https://api.openai.com/v1", model: "gpt-transcribe" },
+  xai: { baseUrl: "https://api.x.ai/v1", model: "grok-voice-transcribe-2.0" },
+} as const satisfies Record<VoiceTranscriptionProvider, { baseUrl: string; model: string }>;
+
 export const VoiceTranscriptionSettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  provider: VoiceTranscriptionProvider.pipe(
+    Schema.withDecodingDefault(Effect.succeed("openai-compatible" as const)),
+  ),
   baseUrl: TrimmedString.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_VOICE_TRANSCRIPTION_BASE_URL)),
+    Schema.withDecodingDefault(
+      Effect.succeed(VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS["openai-compatible"].baseUrl),
+    ),
   ),
   model: TrimmedString.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_VOICE_TRANSCRIPTION_MODEL)),
+    Schema.withDecodingDefault(
+      Effect.succeed(VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS["openai-compatible"].model),
+    ),
   ),
   /** ISO-639-1 code. Empty lets the model detect the language. */
   language: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -1545,6 +1561,7 @@ export const ServerSettingsPatch = Schema.Struct({
   voiceTranscription: Schema.optionalKey(
     Schema.Struct({
       enabled: Schema.optionalKey(Schema.Boolean),
+      provider: Schema.optionalKey(VoiceTranscriptionProvider),
       baseUrl: Schema.optionalKey(TrimmedString),
       model: Schema.optionalKey(TrimmedString),
       language: Schema.optionalKey(TrimmedString),

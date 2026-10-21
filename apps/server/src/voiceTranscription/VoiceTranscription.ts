@@ -1,5 +1,5 @@
 import {
-  DEFAULT_VOICE_TRANSCRIPTION_BASE_URL,
+  VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS,
   VOICE_TRANSCRIPTION_URL_TTL_MS,
   VoiceTranscriptionAudioMimeType,
   type VoiceTranscriptionCreateUrlInput,
@@ -162,7 +162,10 @@ function resolveEndpoint(
   if (!baseUrl) return notConfigured("Voice transcription needs an endpoint URL.");
   if (!settings.model) return notConfigured("Voice transcription needs a model name.");
   // Local whisper.cpp-style servers take no key, but OpenAI itself always does.
-  if (!settings.apiKey && baseUrl === DEFAULT_VOICE_TRANSCRIPTION_BASE_URL) {
+  if (
+    !settings.apiKey &&
+    baseUrl === VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS[settings.provider].baseUrl
+  ) {
     return notConfigured("Add an OpenAI API key to use voice transcription.");
   }
   const url = URL.parse(`${baseUrl}/audio/transcriptions`);
