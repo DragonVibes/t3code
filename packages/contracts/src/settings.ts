@@ -782,14 +782,25 @@ export type AntigravitySettings = typeof AntigravitySettings.Type;
  * `openai-compatible` posts to `<baseUrl>/audio/transcriptions` (OpenAI, Groq, a whisper.cpp
  * server); `xai` posts to `<baseUrl>/stt`, whose form fields differ.
  */
-export const VoiceTranscriptionProvider = Schema.Literals(["openai-compatible", "xai"]);
+export const HttpVoiceTranscriptionProvider = Schema.Literals(["openai-compatible", "xai"]);
+export type HttpVoiceTranscriptionProvider = typeof HttpVoiceTranscriptionProvider.Type;
+
+/**
+ * `apple-on-device` runs Apple's SpeechAnalyzer on the environment's own Mac and ignores
+ * `baseUrl`, `model`, and `apiKey`. Offer it only when the environment advertises
+ * `capabilities.appleOnDeviceTranscription`.
+ */
+export const VoiceTranscriptionProvider = Schema.Literals([
+  ...HttpVoiceTranscriptionProvider.literals,
+  "apple-on-device",
+]);
 export type VoiceTranscriptionProvider = typeof VoiceTranscriptionProvider.Type;
 
 /** A key is required whenever `baseUrl` is still the provider's hosted default. */
 export const VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS = {
   "openai-compatible": { baseUrl: "https://api.openai.com/v1", model: "gpt-transcribe" },
   xai: { baseUrl: "https://api.x.ai/v1", model: "grok-voice-transcribe-2.0" },
-} as const satisfies Record<VoiceTranscriptionProvider, { baseUrl: string; model: string }>;
+} as const satisfies Record<HttpVoiceTranscriptionProvider, { baseUrl: string; model: string }>;
 
 export const VoiceTranscriptionSettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),

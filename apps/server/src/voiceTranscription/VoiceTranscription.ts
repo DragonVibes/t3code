@@ -5,6 +5,7 @@ import {
   type VoiceTranscriptionCreateUrlInput,
   type VoiceTranscriptionCreateUrlResult,
   VoiceTranscriptionNotConfiguredError,
+  type VoiceTranscriptionProvider,
   type VoiceTranscriptionResult,
   type VoiceTranscriptionSettings,
   VoiceTranscriptionSigningKeyError,
@@ -41,6 +42,52 @@ const AUDIO_FILE_EXTENSIONS = {
   "audio/wav": "wav",
 } as const satisfies Record<VoiceTranscriptionAudioMimeType, string>;
 
+interface TranscriptionFormInput {
+  readonly model: string;
+  readonly language: string;
+  readonly file: Blob;
+  readonly fileName: string;
+}
+
+interface ProviderProtocol {
+  readonly name: string;
+  readonly path: string;
+  readonly acceptedMimeTypes: ReadonlyArray<VoiceTranscriptionAudioMimeType>;
+  readonly form: (input: TranscriptionFormInput) => FormData;
+}
+
+const PROVIDER_PROTOCOLS = {
+  "openai-compatible": {
+    name: "OpenAI",
+    path: "audio/transcriptions",
+    acceptedMimeTypes: VoiceTranscriptionAudioMimeType.literals,
+    form: ({ model, language, file, fileName }) => {
+      const form = new FormData();
+      form.append("file", file, fileName);
+      form.append("model", model);
+      form.append("response_format", "json");
+      if (language) {
+        // gpt-transcribe takes a `languages` array instead of `language` and rejects both together.
+        form.append(model.startsWith("gpt-transcribe") ? "languages[]" : "language", language);
+      }
+      return form;
+    },
+  },
+  xai: {
+    name: "xAI",
+    path: "stt",
+    acceptedMimeTypes: ["audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav"],
+    form: ({ model, language, file, fileName }) => {
+      const form = new FormData();
+      form.append("model", model);
+      if (language) form.append("language", language);
+      // xAI may ignore fields sent after `file`, so it must be last.
+      form.append("file", file, fileName);
+      return form;
+    },
+  },
+} as const satisfies Record<VoiceTranscriptionProvider, ProviderProtocol>;
+
 const VoiceTranscriptionClaims = Schema.Struct({
   version: Schema.Literal(1),
   kind: Schema.Literal("voice-transcription"),
@@ -75,6 +122,23 @@ export class VoiceTranscriptionInvalidUploadError extends Schema.TaggedError<Voi
     return `The recording was ${this.receivedBytes} bytes, expected ${this.expectedBytes}.`;
   }
 }
+
+export class VoiceTranscriptionUnsupportedFormatError extends Schema.TaggedError<VoiceTranscriptionUnsupportedFormatError>()(
+  "VoiceTranscriptionUnsupportedFormatError",
+  {
+    providerName: Schema.String,
+    mimeType: VoiceTranscriptionAudioMimeType,
+  },
+) {
+  override get message(): string {
+    return unsupportedFormatMessage(this.providerName, this.mimeType);
+  }
+}
+
+const unsupportedFormatMessage = (
+  providerName: string,
+  mimeType: VoiceTranscriptionAudioMimeType,
+) => `${providerName} does not accept ${mimeType} recordings.`;
 
 export class VoiceTranscriptionCredentialsRejectedError extends Schema.TaggedError<VoiceTranscriptionCredentialsRejectedError>()(
   "VoiceTranscriptionCredentialsRejectedError",
@@ -136,6 +200,7 @@ export class VoiceTranscription extends Context.Service<
       VoiceTranscriptionResult,
       | VoiceTranscriptionNotConfiguredError
       | VoiceTranscriptionInvalidUploadError
+      | VoiceTranscriptionUnsupportedFormatError
       | VoiceTranscriptionCredentialsRejectedError
       | VoiceTranscriptionUpstreamError
     >;
@@ -143,6 +208,7 @@ export class VoiceTranscription extends Context.Service<
 >()("t3/voiceTranscription/VoiceTranscription") {}
 
 interface TranscriptionEndpoint {
+  readonly protocol: ProviderProtocol;
   readonly url: string;
   readonly host: string;
   readonly model: string;
@@ -161,47 +227,26 @@ function resolveEndpoint(
   const baseUrl = settings.baseUrl.replace(/\/+$/, "");
   if (!baseUrl) return notConfigured("Voice transcription needs an endpoint URL.");
   if (!settings.model) return notConfigured("Voice transcription needs a model name.");
-  // Local whisper.cpp-style servers take no key, but OpenAI itself always does.
+  const protocol = PROVIDER_PROTOCOLS[settings.provider];
+  // Local whisper.cpp-style servers take no key, but the hosted defaults always do.
   if (
     !settings.apiKey &&
     baseUrl === VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS[settings.provider].baseUrl
   ) {
-    return notConfigured("Add an OpenAI API key to use voice transcription.");
+    return notConfigured(`Add an ${protocol.name} API key to use voice transcription.`);
   }
-  const url = URL.parse(`${baseUrl}/audio/transcriptions`);
+  const url = URL.parse(`${baseUrl}/${protocol.path}`);
   if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) {
     return notConfigured("The voice transcription endpoint URL is not valid.");
   }
   return Effect.succeed({
+    protocol,
     url: url.toString(),
     host: url.host,
     model: settings.model,
     language: settings.language,
     apiKey: settings.apiKey,
   });
-}
-
-function transcriptionForm(
-  endpoint: TranscriptionEndpoint,
-  claims: VoiceTranscriptionClaims,
-  audio: Uint8Array<ArrayBuffer>,
-) {
-  const form = new FormData();
-  form.append(
-    "file",
-    new Blob([audio], { type: claims.mimeType }),
-    `audio.${AUDIO_FILE_EXTENSIONS[claims.mimeType]}`,
-  );
-  form.append("model", endpoint.model);
-  form.append("response_format", "json");
-  if (endpoint.language) {
-    // gpt-transcribe takes a `languages` array instead of `language` and rejects both together.
-    form.append(
-      endpoint.model.startsWith("gpt-transcribe") ? "languages[]" : "language",
-      endpoint.language,
-    );
-  }
-  return form;
 }
 
 const readUpstreamMessage = (
@@ -246,7 +291,12 @@ const make = Effect.gen(function* () {
   const createUploadUrl = Effect.fn("VoiceTranscription.createUploadUrl")(function* (
     input: VoiceTranscriptionCreateUrlInput,
   ) {
-    yield* loadEndpoint;
+    const endpoint = yield* loadEndpoint;
+    if (!endpoint.protocol.acceptedMimeTypes.includes(input.mimeType)) {
+      return yield* new VoiceTranscriptionNotConfiguredError({
+        message: unsupportedFormatMessage(endpoint.protocol.name, input.mimeType),
+      });
+    }
     const secret = yield* signingSecret.pipe(
       Effect.mapError((cause) => new VoiceTranscriptionSigningKeyError({ cause })),
     );
@@ -304,12 +354,26 @@ const make = Effect.gen(function* () {
       });
     }
     const endpoint = yield* loadEndpoint;
+    // The provider can change between minting and uploading.
+    if (!endpoint.protocol.acceptedMimeTypes.includes(claims.mimeType)) {
+      return yield* new VoiceTranscriptionUnsupportedFormatError({
+        providerName: endpoint.protocol.name,
+        mimeType: claims.mimeType,
+      });
+    }
     const upstreamError = (
       fields: Omit<ConstructorParameters<typeof VoiceTranscriptionUpstreamError>[0], "host">,
     ) => new VoiceTranscriptionUpstreamError({ host: endpoint.host, ...fields });
 
     const request = HttpClientRequest.post(endpoint.url).pipe(
-      HttpClientRequest.bodyFormData(transcriptionForm(endpoint, claims, audio)),
+      HttpClientRequest.bodyFormData(
+        endpoint.protocol.form({
+          model: endpoint.model,
+          language: endpoint.language,
+          file: new Blob([audio], { type: claims.mimeType }),
+          fileName: `audio.${AUDIO_FILE_EXTENSIONS[claims.mimeType]}`,
+        }),
+      ),
       endpoint.apiKey ? HttpClientRequest.bearerToken(endpoint.apiKey) : identity,
       HttpClientRequest.acceptJson,
     );
