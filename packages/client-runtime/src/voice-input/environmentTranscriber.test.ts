@@ -173,8 +173,8 @@ describe("createEnvironmentVoiceTranscriber", () => {
   it.each([
     ["upstream_failed", 502, true],
     ["internal", 500, true],
+    ["invalid_upload", 400, true],
     ["not_configured", 409, false],
-    ["invalid_upload", 400, false],
     ["upstream_rejected_credentials", 502, false],
   ] as const)("marks a %s failure retryable: %s", async (code, status, retryable) => {
     const error = await transcriptionError(

@@ -48,7 +48,8 @@ const decodeNotConfigured = Schema.decodeUnknownOption(VoiceTranscriptionNotConf
 
 const RETRYABLE_FAILURES: Record<VoiceTranscriptionFailureCode, boolean> = {
   not_configured: false,
-  invalid_upload: false,
+  // Every invalid upload is a transfer fault, such as an expired link or a truncated body.
+  invalid_upload: true,
   upstream_rejected_credentials: false,
   upstream_failed: true,
   internal: true,
