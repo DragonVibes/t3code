@@ -538,7 +538,9 @@ export const layerVoiceTranscriptionRoute = HttpRouter.add(
       );
     }
     const { sizeBytes } = claims.value;
-    if (Number(request.headers["content-length"]) !== sizeBytes) {
+    const contentLength = request.headers["content-length"];
+    // Tunnels may re-chunk the body. The read cap and transcribe's exact byte count still apply.
+    if (contentLength !== undefined && Number(contentLength) !== sizeBytes) {
       return voiceTranscriptionFailure(
         "invalid_upload",
         `Content-Length must match the recording size of ${sizeBytes} bytes.`,

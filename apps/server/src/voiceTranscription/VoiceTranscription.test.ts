@@ -99,7 +99,7 @@ const apple = { provider: "apple-on-device", baseUrl: "", model: "", apiKey: "" 
 
 const post = (
   relativeUrl: string,
-  options: { readonly body?: Uint8Array; readonly contentLength?: number } = {},
+  options: { readonly body?: Uint8Array; readonly contentLength?: number | null } = {},
 ) =>
   Effect.gen(function* () {
     const body = options.body ?? audio;
@@ -109,7 +109,9 @@ const post = (
       body: new Blob([new Uint8Array(body)]),
       headers: {
         "content-type": "audio/webm",
-        "content-length": String(options.contentLength ?? body.byteLength),
+        ...(options.contentLength === null
+          ? {}
+          : { "content-length": String(options.contentLength ?? body.byteLength) }),
       },
     });
     const response = HttpServerResponse.toWeb(
@@ -573,6 +575,29 @@ describe("VoiceTranscription", () => {
       }).pipe(Effect.provide(layer));
     },
   );
+
+  it.effect("accepts a re-chunked upload without Content-Length but still checks its size", () => {
+    const { layer, requests } = setup({});
+    return Effect.gen(function* () {
+      expect(yield* post((yield* mint).relativeUrl, { contentLength: null })).toEqual({
+        status: 200,
+        body: { text: "hello world" },
+      });
+      const longer = yield* post((yield* mint).relativeUrl, {
+        body: new Uint8Array([...audio, 7]),
+        contentLength: null,
+      });
+      const shorter = yield* post((yield* mint).relativeUrl, {
+        body: audio.slice(1),
+        contentLength: null,
+      });
+      for (const response of [longer, shorter]) {
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe("invalid_upload");
+      }
+      expect(requests).toHaveLength(1);
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect("accepts each upload link once", () => {
     const { layer, requests } = setup({});
