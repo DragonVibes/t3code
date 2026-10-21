@@ -19,7 +19,8 @@ export interface ComposerVoiceInputInput {
   readonly language: string;
   readonly draftText: string;
   readonly readDraft: () => Omit<VoiceDraftSnapshot, "revision">;
-  readonly commitDraft: (text: string, selection: VoiceDraftSnapshot["selection"]) => void;
+  /** False when the composer refused the text, for example while a choice-only question owns it. */
+  readonly commitDraft: (text: string, selection: VoiceDraftSnapshot["selection"]) => boolean;
 }
 
 export interface ComposerVoiceInput {

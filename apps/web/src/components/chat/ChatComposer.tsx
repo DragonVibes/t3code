@@ -2096,16 +2096,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // the React Compiler rejects a closure that captures a const declared later. The
   // layout effect below that declaration fills this in.
   const voiceCommitRef = useRef<
-    ((text: string, selection: { readonly start: number; readonly end: number }) => void) | null
+    ((text: string, selection: { readonly start: number; readonly end: number }) => boolean) | null
   >(null);
   const commitVoiceDraftStable = useStableCallback(
-    (text: string, selection: { readonly start: number; readonly end: number }) => {
-      voiceCommitRef.current?.(text, selection);
-    },
+    (text: string, selection: { readonly start: number; readonly end: number }) =>
+      voiceCommitRef.current?.(text, selection) ?? false,
   );
+  // A pending question swaps the composer's text for its answer, so a recording that
+  // started on the draft must not land there.
+  const voiceOwnerKey =
+    pendingUserInputs[0] && activePendingProgress?.activeQuestion
+      ? `${composerDraftTargetKey}:${pendingUserInputs[0].requestId}:${activePendingProgress.activeQuestion.id}`
+      : composerDraftTargetKey;
   const voiceInput = useComposerVoiceInput({
     environmentId,
-    ownerKey: composerDraftTargetKey,
+    ownerKey: voiceOwnerKey,
     language: settings.voiceTranscription.language,
     draftText: prompt,
     readDraft: readVoiceDraftStable,
@@ -3826,11 +3831,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   };
   const applyPromptReplacementStable = useStableCallback(applyPromptReplacement);
   useLayoutEffect(() => {
-    voiceCommitRef.current = (text, selection) => {
+    voiceCommitRef.current = (text, selection) =>
       applyPromptReplacement(0, promptRef.current.length, text, {
         expandedCursorAfterReplace: selection.start,
       });
-    };
   });
 
   const readComposerSnapshot = (): {

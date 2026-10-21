@@ -9,7 +9,7 @@ export type VoiceInputTarget = {
   readonly ownerKey: string;
   readonly label?: string;
   readonly readDraft: () => VoiceDraftSnapshot | null;
-  readonly commitDraft: VoiceInputControllerDependencies["commitDraft"];
+  readonly commitDraft: (text: string, selection: VoiceDraftSnapshot["selection"]) => void;
   readonly subscribe: () => () => void;
 };
 
@@ -58,7 +58,11 @@ export class VoiceInputSession {
         dependencies.onStateChange(state);
       },
       readDraft: () => this.target?.readDraft() ?? null,
-      commitDraft: (text, selection) => this.target?.commitDraft(text, selection),
+      commitDraft: (text, selection) => {
+        if (!this.target) return false;
+        this.target.commitDraft(text, selection);
+        return true;
+      },
     });
   }
 
