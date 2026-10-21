@@ -778,6 +778,51 @@ export const AntigravitySettings = makeProviderSettingsSchema(
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 
+/**
+ * `openai-compatible` posts to `<baseUrl>/audio/transcriptions` (OpenAI, Groq, a whisper.cpp
+ * server); `xai` posts to `<baseUrl>/stt`, whose form fields differ.
+ */
+export const HttpVoiceTranscriptionProvider = Schema.Literals(["openai-compatible", "xai"]);
+export type HttpVoiceTranscriptionProvider = typeof HttpVoiceTranscriptionProvider.Type;
+
+/**
+ * `apple-on-device` runs Apple's SpeechAnalyzer on the environment's own Mac and ignores
+ * `baseUrl`, `model`, and `apiKey`. Offer it only when the environment advertises
+ * `capabilities.appleOnDeviceTranscription`.
+ */
+export const VoiceTranscriptionProvider = Schema.Literals([
+  ...HttpVoiceTranscriptionProvider.literals,
+  "apple-on-device",
+]);
+export type VoiceTranscriptionProvider = typeof VoiceTranscriptionProvider.Type;
+
+/** A key is required whenever `baseUrl` is still the provider's hosted default. */
+export const VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS = {
+  "openai-compatible": { baseUrl: "https://api.openai.com/v1", model: "gpt-transcribe" },
+  xai: { baseUrl: "https://api.x.ai/v1", model: "grok-voice-transcribe-2.0" },
+} as const satisfies Record<HttpVoiceTranscriptionProvider, { baseUrl: string; model: string }>;
+
+export const VoiceTranscriptionSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  provider: VoiceTranscriptionProvider.pipe(
+    Schema.withDecodingDefault(Effect.succeed("openai-compatible" as const)),
+  ),
+  baseUrl: TrimmedString.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed(VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS["openai-compatible"].baseUrl),
+    ),
+  ),
+  model: TrimmedString.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed(VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS["openai-compatible"].model),
+    ),
+  ),
+  /** ISO-639-1 code. Empty lets the model detect the language. */
+  language: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  apiKey: TrimmedString.pipe(secretSetting, Schema.withDecodingDefault(Effect.succeed(""))),
+});
+export type VoiceTranscriptionSettings = typeof VoiceTranscriptionSettings.Type;
+
 export const UsageLimitSourceConfig = Schema.Struct({
   kind: Schema.Literal("cliproxy"),
   label: Schema.optional(TrimmedNonEmptyString),
@@ -1255,6 +1300,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  voiceTranscription: VoiceTranscriptionSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   sourceControlHosts: Schema.Record(Schema.String, SourceControlHostSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1518,6 +1566,17 @@ export const ServerSettingsPatch = Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),
       otlpMetricsUrl: Schema.optionalKey(TrimmedString),
       otlpLogsUrl: Schema.optionalKey(TrimmedString),
+    }),
+  ),
+  /** An omitted `apiKey` keeps the saved key; an empty one removes it. */
+  voiceTranscription: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      provider: Schema.optionalKey(VoiceTranscriptionProvider),
+      baseUrl: Schema.optionalKey(TrimmedString),
+      model: Schema.optionalKey(TrimmedString),
+      language: Schema.optionalKey(TrimmedString),
+      apiKey: Schema.optionalKey(TrimmedString),
     }),
   ),
   /**

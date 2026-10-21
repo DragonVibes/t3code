@@ -5,7 +5,28 @@ import {
   resolveComposerTimelineInset,
   resolveRestingComposerControlsLayout,
   resolveRestingComposerControlsNaturalWidth,
+  shouldUseCompactComposerFooter,
+  shouldUseCompactComposerPrimaryActions,
 } from "./composerFooterLayout";
+
+describe("composer footer compaction", () => {
+  it("reserves room for the recording pill so the send button never clips", () => {
+    expect(shouldUseCompactComposerFooter(700)).toBe(false);
+    expect(shouldUseCompactComposerFooter(700, { hasActiveVoiceControl: true })).toBe(true);
+    expect(shouldUseCompactComposerFooter(760, { hasActiveVoiceControl: true })).toBe(false);
+
+    expect(shouldUseCompactComposerPrimaryActions(850, { hasWideActions: true })).toBe(false);
+    expect(
+      shouldUseCompactComposerPrimaryActions(850, {
+        hasWideActions: true,
+        hasActiveVoiceControl: true,
+      }),
+    ).toBe(true);
+    expect(shouldUseCompactComposerPrimaryActions(850, { hasActiveVoiceControl: true })).toBe(
+      false,
+    );
+  });
+});
 
 describe("resolveComposerTimelineInset", () => {
   it("keeps timeline padding stable when the model-only strip appears on collapse", () => {

@@ -88,13 +88,14 @@ describe("createLazyVoiceRecorder", () => {
         configureRecording: async () => undefined,
         releaseRecording: async () => undefined,
         deleteRecording: (uri) => deleted.push(uri),
+        retainFailedRecordings: false,
         readDraft: () => ({
           ownerKey: "thread",
           text: "",
           selection: { start: 0, end: 0 },
           revision: 0,
         }),
-        commitDraft: () => undefined,
+        commitDraft: () => true,
         onStateChange: () => undefined,
       });
       return { ...harness, controller, deleted };

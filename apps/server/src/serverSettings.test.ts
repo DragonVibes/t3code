@@ -1267,6 +1267,87 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
   );
 
+  it.effect(
+    "stores the voice transcription key as a secret and keeps it across partial patches",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const store = yield* ServerSecretStore.ServerSecretStore;
+        const saved = yield* service.updateSettings({
+          voiceTranscription: { enabled: true, apiKey: "sk-voice-secret" },
+        });
+        assert.strictEqual(saved.voiceTranscription.apiKey, "sk-voice-secret");
+        assert.notInclude(yield* fs.readFileString(config.settingsPath), "sk-voice-secret");
+        assert.isTrue(Option.isSome(yield* store.get("voice-transcription-api-key")));
+        const client = ServerSettingsModule.redactServerSettingsForClient(saved);
+        assert.strictEqual(client.voiceTranscription.apiKey, "••••••");
+        assert.notInclude(JSON.stringify(client), "sk-voice-secret");
+
+        const edited = yield* service.updateSettings({
+          voiceTranscription: { model: "whisper-1" },
+        });
+        assert.deepInclude(edited.voiceTranscription, {
+          enabled: true,
+          model: "whisper-1",
+          apiKey: "sk-voice-secret",
+        });
+        const echoed = yield* service.updateSettings({
+          voiceTranscription: { apiKey: client.voiceTranscription.apiKey },
+        });
+        assert.strictEqual(echoed.voiceTranscription.apiKey, "sk-voice-secret");
+        assert.strictEqual(
+          (yield* service.getSettings).voiceTranscription.apiKey,
+          "sk-voice-secret",
+        );
+
+        const removed = yield* service.updateSettings({ voiceTranscription: { apiKey: "" } });
+        assert.strictEqual(removed.voiceTranscription.apiKey, "");
+        assert.isTrue(Option.isNone(yield* store.get("voice-transcription-api-key")));
+      }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
+  it.effect.each([
+    {
+      name: "a base URL on another origin",
+      patch: { baseUrl: "https://transcribe.example.com/v1" },
+      keeps: false,
+    },
+    { name: "another provider", patch: { provider: "xai" }, keeps: false },
+    {
+      name: "a path on the same origin",
+      patch: { baseUrl: "https://api.openai.com/v2" },
+      keeps: true,
+    },
+    { name: "a model change", patch: { model: "whisper-1" }, keeps: true },
+  ] as const)("keeps the voice transcription key across $name: $keeps", ({ patch, keeps }) =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const store = yield* ServerSecretStore.ServerSecretStore;
+      yield* service.updateSettings({
+        voiceTranscription: { enabled: true, apiKey: "sk-voice-secret" },
+      });
+      const moved = yield* service.updateSettings({ voiceTranscription: patch });
+      assert.strictEqual(moved.voiceTranscription.apiKey, keeps ? "sk-voice-secret" : "");
+      assert.strictEqual(Option.isSome(yield* store.get("voice-transcription-api-key")), keeps);
+    }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
+  it.effect("saves a key sent together with a move to another origin", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.updateSettings({
+        voiceTranscription: { enabled: true, apiKey: "sk-voice-secret" },
+      });
+      const moved = yield* service.updateSettings({
+        voiceTranscription: { baseUrl: "https://transcribe.example.com/v1", apiKey: "sk-new" },
+      });
+      assert.strictEqual(moved.voiceTranscription.apiKey, "sk-new");
+      assert.strictEqual((yield* service.getSettings).voiceTranscription.apiKey, "sk-new");
+    }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
   it.effect("moves saved provider credentials to the secret store when settings load", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;

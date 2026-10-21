@@ -67,6 +67,7 @@ import {
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
+  MicIcon,
   MonitorIcon,
   MoonIcon,
   PaletteIcon,
@@ -121,6 +122,7 @@ import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
+import { voiceTranscriptionEnvironment } from "~/state/voiceTranscription";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -240,7 +242,11 @@ import { Kbd, KbdGroup } from "./ui/kbd";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-import { ComposerHandleContext, useComposerHandleContext } from "../composerHandleContext";
+import {
+  ComposerHandleContext,
+  useComposerHandleContext,
+  type ComposerHandleRef,
+} from "../composerHandleContext";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
 import { getProjectOrderKey } from "../logicalProject";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
@@ -703,6 +709,15 @@ function CommandPaletteDialog(props: {
   );
 }
 
+function toggleComposerDictation(composerHandleRef: ComposerHandleRef | null): void {
+  if (composerHandleRef?.current?.toggleDictation() === true) return;
+  toastManager.add({
+    type: "warning",
+    title: "Voice input is not available right now",
+    description: "The composer is not accepting text at the moment.",
+  });
+}
+
 function OpenCommandPaletteDialog(props: {
   readonly openIntent: CommandPaletteOpenIntent | null;
   readonly setOpen: (open: boolean) => void;
@@ -1006,6 +1021,16 @@ function OpenCommandPaletteDialog(props: {
   const currentProjectEnvironmentId =
     activeThread?.environmentId ?? activeDraftThread?.environmentId ?? null;
   const currentProjectId = activeThread?.projectId ?? activeDraftThread?.projectId ?? null;
+  const canCreateTranscriptionUrl = useAtomValue(
+    voiceTranscriptionEnvironment.createTranscriptionUrl.permissionAtom(
+      currentProjectEnvironmentId,
+    ),
+  );
+  const voiceInputAvailable =
+    canCreateTranscriptionUrl &&
+    environments.find((environment) => environment.environmentId === currentProjectEnvironmentId)
+      ?.serverConfig?.settings.voiceTranscription.enabled === true;
+  const composerHandleRef = useComposerHandleContext();
   const scratchTargetEnvironmentId = scratchEnvironmentId(
     currentProjectEnvironmentId ?? primaryEnvironmentId,
   );
@@ -1645,6 +1670,18 @@ function OpenCommandPaletteDialog(props: {
       run: async () => {
         requestThreadFindOpen();
       },
+    });
+  }
+
+  if (voiceInputAvailable) {
+    actionItems.push({
+      kind: "action",
+      value: "voice-input",
+      title: "Voice input",
+      searchTerms: ["dictate", "dictation", "microphone", "speech", "transcribe", "voice"],
+      icon: <MicIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "composer.toggleDictation",
+      run: async () => toggleComposerDictation(composerHandleRef),
     });
   }
 

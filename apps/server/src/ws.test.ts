@@ -12,13 +12,16 @@ import {
   type ServerConfig,
   type ServerConfigStreamEvent,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { Headers } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -49,6 +52,7 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
+import * as ProcessRunner from "./processRunner.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
@@ -84,6 +88,8 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
+import * as AppleSpeechHelper from "./voiceTranscription/AppleSpeechHelper.ts";
+import * as VoiceTranscription from "./voiceTranscription/VoiceTranscription.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
@@ -110,7 +116,7 @@ import {
   subscribeOrchestrationV2Shell,
   subscribeOrchestrationV2Thread,
   WS_RPC_SERVER_OPTIONS,
-  withLateEditorConfig,
+  withLateConfig,
 } from "./ws.ts";
 
 const snapshotConfig = (fields: Partial<ServerConfig>) =>
@@ -125,7 +131,7 @@ const settingsUpdated = (settings: object): ServerConfigStreamEvent => ({
 it.effect("resends late editors without rolling back updates already sent", () =>
   Effect.gen(function* () {
     const settingsSent = yield* Deferred.make<void>();
-    const events = yield* withLateEditorConfig(
+    const events = yield* withLateConfig(
       snapshotConfig({ settings: { enableProviderUpdateChecks: true } as never }),
       Stream.make(settingsUpdated({ enableProviderUpdateChecks: false })),
       {
@@ -133,6 +139,7 @@ it.effect("resends late editors without rolling back updates already sent", () =
         resolveFileManagerRevealKind: () =>
           Deferred.await(settingsSent).pipe(Effect.as("file-explorer" as const)),
       },
+      Stream.empty,
     ).pipe(
       Stream.tap((event) =>
         event.type === "settingsUpdated" ? Deferred.succeed(settingsSent, undefined) : Effect.void,
@@ -154,13 +161,14 @@ it.effect("resends late editors without rolling back updates already sent", () =
 
 it.effect("resends a file manager reveal kind that missed the snapshot", () =>
   Effect.gen(function* () {
-    const events = yield* withLateEditorConfig(
+    const events = yield* withLateConfig(
       snapshotConfig({ availableEditors: ["file-manager"] }),
       Stream.empty,
       {
         resolveAvailableEditors: () => Effect.succeed(["file-manager"]),
         resolveFileManagerRevealKind: () => Effect.succeed("file-explorer"),
       },
+      Stream.empty,
     ).pipe(Stream.runCollect);
 
     const [late] = Array.from(events);
@@ -352,6 +360,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(UsageService.UsageService)({}),
   Layer.mock(VcsProvisioningService.VcsProvisioningService)({}),
   Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
+  Layer.mock(VoiceTranscription.VoiceTranscription)({}),
   Layer.mock(WorkspaceEntries.WorkspaceEntries)({}),
   Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({}),
   Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
@@ -368,6 +377,80 @@ const layerConfigSources = Layer.mergeAll(
     ),
   ),
   Layer.provideMerge(NodeServices.layer),
+);
+
+const layerStaticConfigRpcServices = Layer.mergeAll(
+  layerUnusedConfigRpcServices,
+  Layer.mock(ProviderRegistry.ProviderRegistry)({
+    getProviders: Effect.succeed([]),
+    streamChanges: Stream.never,
+  }),
+  Layer.mock(UsageLimitSources.UsageLimitSources)({ streamChanges: Stream.make([]) }),
+  Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({
+    resolveTargets: () => Effect.succeed([]),
+  }),
+  Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
+  Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+    scratchRoot: Effect.succeedNone,
+    namedProjectsRoot: process.cwd(),
+  }),
+  Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+    getDescriptor: () =>
+      Effect.succeed({
+        policy: "loopback-browser",
+        bootstrapMethods: [],
+        sessionMethods: ["browser-session-cookie"],
+        sessionCookieName: "config-test-session",
+      }),
+  }),
+);
+
+const serveConfigRpc = <ROut, E, RIn>(configRpcServices: Layer.Layer<ROut, E, RIn>) =>
+  Effect.gen(function* () {
+    const responses = yield* Queue.unbounded<ServerConfigStreamEvent>();
+    const server = yield* RpcServer.makeNoSerialization(RpcGroup.make(WsSubscribeServerConfigRpc), {
+      ...WS_RPC_SERVER_OPTIONS,
+      onFromServer: (response) =>
+        response._tag === "Chunk"
+          ? Effect.forEach(response.values, (event) => Queue.offer(responses, event), {
+              discard: true,
+            })
+          : Effect.void,
+    }).pipe(
+      Effect.provide(
+        layerWsRpc(
+          {
+            sessionId: AuthSessionId.make("config-test"),
+            subject: "config-test",
+            method: "browser-session-cookie",
+            scopes: [],
+          },
+          {},
+          {},
+          yield* PreviewAutomationBroker.PreviewAutomationBroker,
+          yield* ServerBrowser.ServerBrowser,
+        ).pipe(Layer.provide(configRpcServices)),
+      ),
+    );
+    const requestId = RpcMessage.RequestId("config");
+    return {
+      responses,
+      subscribe: server.write(0, {
+        _tag: "Request",
+        id: requestId,
+        tag: WS_METHODS.subscribeServerConfig,
+        payload: {},
+        headers: Headers.empty,
+      }),
+      acknowledge: server.write(0, { _tag: "Ack", requestId }),
+      unsubscribe: server.write(0, { _tag: "Interrupt", requestId, interruptors: [] }),
+    };
+  });
+
+const layerConfigRpcTest = Layer.mergeAll(
+  Layer.fresh(layerConfigSources),
+  Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+  Layer.mock(ServerBrowser.ServerBrowser)({}),
 );
 
 it.effect(
@@ -387,102 +470,47 @@ it.effect(
       const initialKeybindings = (yield* keybindings.getSnapshot).keybindings;
       const discoveryStarted = yield* Deferred.make<void>();
       const finishDiscovery = yield* Deferred.make<void>();
-      const responses = yield* Queue.unbounded<ServerConfigStreamEvent>();
-      const configRpcServices = Layer.mergeAll(
-        layerUnusedConfigRpcServices,
-        Layer.mock(ExternalLauncher.ExternalLauncher)({
-          resolveAvailableEditors: () =>
-            Deferred.succeed(discoveryStarted, undefined).pipe(
-              Effect.andThen(Deferred.await(finishDiscovery)),
-              Effect.as([]),
-            ),
-          resolveFileManagerRevealKind: () => Effect.succeed(undefined),
-        }),
-        Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getProviders: Effect.succeed([]),
-          streamChanges: Stream.never,
-        }),
-        Layer.mock(UsageLimitSources.UsageLimitSources)({ streamChanges: Stream.make([]) }),
-        Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({
-          resolveTargets: () => Effect.succeed([]),
-        }),
-        Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
-        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
-          scratchRoot: Effect.succeedNone,
-          namedProjectsRoot: process.cwd(),
-        }),
-        Layer.mock(ServerEnvironment.ServerEnvironment)({
-          getDescriptor: Effect.succeed({
-            environmentId: EnvironmentId.make("config-test"),
-            label: "Config test",
-            platform: { os: "linux", arch: "x64" },
-            serverVersion: "0.0.0",
-            capabilities: { repositoryIdentity: false },
+      const config = yield* serveConfigRpc(
+        Layer.mergeAll(
+          layerStaticConfigRpcServices,
+          Layer.mock(ExternalLauncher.ExternalLauncher)({
+            resolveAvailableEditors: () =>
+              Deferred.succeed(discoveryStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(finishDiscovery)),
+                Effect.as([]),
+              ),
+            resolveFileManagerRevealKind: () => Effect.succeed(undefined),
           }),
-        }),
-        Layer.mock(EnvironmentAuth.EnvironmentAuth)({
-          getDescriptor: () =>
-            Effect.succeed({
-              policy: "loopback-browser",
-              bootstrapMethods: [],
-              sessionMethods: ["browser-session-cookie"],
-              sessionCookieName: "config-test-session",
+          Layer.mock(ServerEnvironment.ServerEnvironment)({
+            getDescriptor: Effect.succeed({
+              environmentId: EnvironmentId.make("config-test"),
+              label: "Config test",
+              platform: { os: "linux", arch: "x64" },
+              serverVersion: "0.0.0",
+              capabilities: { repositoryIdentity: false },
             }),
-        }),
-        // Signal subscription on either accessor so the test also fails, rather
-        // than hangs, against a handler that subscribes after the snapshot.
-        Layer.succeed(Keybindings.Keybindings, {
-          ...keybindings,
-          streamChanges: Stream.unwrap(keybindingsChanges),
-          subscribeChanges: keybindingsChanges,
-        }),
-        Layer.succeed(ServerSettings.ServerSettingsService, {
-          ...settings,
-          streamChanges: Stream.unwrap(settingsChanges),
-          subscribeChanges: settingsChanges,
-        }),
-      );
-      const server = yield* RpcServer.makeNoSerialization(
-        RpcGroup.make(WsSubscribeServerConfigRpc),
-        {
-          ...WS_RPC_SERVER_OPTIONS,
-          onFromServer: (response) =>
-            response._tag === "Chunk"
-              ? Effect.forEach(response.values, (event) => Queue.offer(responses, event), {
-                  discard: true,
-                })
-              : Effect.void,
-        },
-      ).pipe(
-        Effect.provide(
-          layerWsRpc(
-            {
-              sessionId: AuthSessionId.make("config-test"),
-              subject: "config-test",
-              method: "browser-session-cookie",
-              scopes: [],
-            },
-            {},
-            {},
-            yield* PreviewAutomationBroker.PreviewAutomationBroker,
-            yield* ServerBrowser.ServerBrowser,
-          ).pipe(Layer.provide(configRpcServices)),
+            streamDescriptorChanges: Stream.never,
+          }),
+          // Signal subscription on either accessor so the test also fails, rather
+          // than hangs, against a handler that subscribes after the snapshot.
+          Layer.succeed(Keybindings.Keybindings, {
+            ...keybindings,
+            streamChanges: Stream.unwrap(keybindingsChanges),
+            subscribeChanges: keybindingsChanges,
+          }),
+          Layer.succeed(ServerSettings.ServerSettingsService, {
+            ...settings,
+            streamChanges: Stream.unwrap(settingsChanges),
+            subscribeChanges: settingsChanges,
+          }),
         ),
       );
-      const requestId = RpcMessage.RequestId("config");
-      const acknowledge = server.write(0, { _tag: "Ack", requestId });
-      yield* server.write(0, {
-        _tag: "Request",
-        id: requestId,
-        tag: WS_METHODS.subscribeServerConfig,
-        payload: {},
-        headers: Headers.empty,
-      });
+      yield* config.subscribe;
       yield* Deferred.await(discoveryStarted);
 
       const duringDiscovery = yield* settings.updateSettings({ defaultAutoPull: true });
       yield* Deferred.succeed(finishDiscovery, undefined);
-      const snapshot = yield* Queue.take(responses);
+      const snapshot = yield* Queue.take(config.responses);
       assert.equal(snapshot.type, "snapshot");
       if (snapshot.type !== "snapshot") return yield* Effect.die("Missing initial snapshot");
       assert.isFalse(snapshot.config.settings.defaultAutoPull);
@@ -491,7 +519,7 @@ it.effect(
         key: "mod+alt+y",
         command: "terminal.toggle",
       });
-      yield* acknowledge;
+      yield* config.acknowledge;
       yield* Deferred.await(keybindingsSubscribed);
       yield* Deferred.await(settingsSubscribed);
 
@@ -507,7 +535,7 @@ it.effect(
       const expectedKeybindings = [duringAck, latestKeybindings];
       // The two sources can interleave, but each must retain its own publication order.
       for (let i = 0; i < 4; i++) {
-        const event = yield* Queue.take(responses);
+        const event = yield* Queue.take(config.responses);
         if (event.type === "settingsUpdated") {
           assert.deepEqual(event.payload.settings, expectedSettings.shift());
         } else {
@@ -517,21 +545,73 @@ it.effect(
           assert.deepEqual(event.payload.keybindings, expectedKeybindings.shift());
           assert.deepEqual(event.payload.issues, []);
         }
-        yield* acknowledge;
+        yield* config.acknowledge;
       }
       assert.isEmpty(expectedSettings);
       assert.isEmpty(expectedKeybindings);
-      yield* server.write(0, { _tag: "Interrupt", requestId, interruptors: [] });
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          Layer.fresh(layerConfigSources),
-          Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
-          Layer.mock(ServerBrowser.ServerBrowser)({}),
+      yield* config.unsubscribe;
+    }).pipe(Effect.provide(layerConfigRpcTest), Effect.scoped),
+);
+
+it.effect(
+  "re-sends the config snapshot when the Apple speech probe answers after subscribing",
+  () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const helperDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-config-apple-speech-test-",
+      });
+      const helperPath = `${helperDir}/t3-apple-speech`;
+      yield* fileSystem.writeFileString(helperPath, "helper");
+      const probeAnswer = yield* Deferred.make<void>();
+      const appleSpeech = yield* AppleSpeechHelper.make.pipe(
+        Effect.provideService(
+          ProcessRunner.ProcessRunner,
+          ProcessRunner.ProcessRunner.of({
+            run: () =>
+              Deferred.await(probeAnswer).pipe(
+                Effect.as({
+                  stdout: '{"available":true}',
+                  stderr: "",
+                  code: ChildProcessSpawner.ExitCode(0),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
+                }),
+              ),
+          }),
         ),
-      ),
-      Effect.scoped,
-    ),
+        Effect.provideService(HostProcess.Platform, "darwin"),
+        Effect.provideService(HostProcess.Environment, { T3CODE_APPLE_SPEECH_PATH: helperPath }),
+        Effect.provideService(AppleSpeechHelper.AppleSpeechHostKernelRelease, "25.0.0"),
+      );
+      const config = yield* serveConfigRpc(
+        Layer.mergeAll(
+          layerStaticConfigRpcServices,
+          Layer.mock(ExternalLauncher.ExternalLauncher)({
+            resolveAvailableEditors: () => Effect.succeed([]),
+            resolveFileManagerRevealKind: () => Effect.succeed(undefined),
+          }),
+          ServerEnvironment.layer.pipe(
+            Layer.provide(Layer.succeed(AppleSpeechHelper.AppleSpeechHelper, appleSpeech)),
+            Layer.provide(ServerSecretStore.layer),
+          ),
+        ),
+      );
+      yield* config.subscribe;
+      const initial = yield* Queue.take(config.responses);
+      if (initial.type !== "snapshot") return yield* Effect.die("Missing initial snapshot");
+      assert.notEqual(initial.config.environment.capabilities.appleOnDeviceTranscription, true);
+      yield* config.acknowledge;
+
+      yield* Deferred.succeed(probeAnswer, undefined);
+      const update = yield* Queue.take(config.responses);
+      if (update.type !== "snapshot") return yield* Effect.die(`Unexpected ${update.type} event`);
+      assert.isTrue(update.config.environment.capabilities.appleOnDeviceTranscription);
+      yield* config.unsubscribe;
+    }).pipe(Effect.provide(layerConfigRpcTest), Effect.scoped),
 );
 
 // Compaction keeps the oldest and newest event per message, so a cursor older

@@ -3,6 +3,8 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  type VoiceTranscriptionFailure,
+  type VoiceTranscriptionFailureCode,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
@@ -20,6 +22,7 @@ import { cast } from "effect/Function";
 import {
   HttpClient,
   HttpClientResponse,
+  HttpIncomingMessage,
   HttpMiddleware,
   HttpRouter,
   HttpServerResponse,
@@ -48,6 +51,7 @@ import {
   failEnvironmentInternal,
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+import * as VoiceTranscription from "./voiceTranscription/VoiceTranscription.ts";
 import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
 import {
   browserApiCorsAllowedHeaders,
@@ -397,8 +401,12 @@ const UNTRACED_REQUEST_PATHS: ReadonlySet<string> = new Set([OTLP_TRACES_PROXY_P
 const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)((request) => {
   const queryIndex = request.url.indexOf("?");
   const path = queryIndex === -1 ? request.url : request.url.slice(0, queryIndex);
-  // Webhook URLs carry their secret token in the path, so they never reach a trace.
-  return UNTRACED_REQUEST_PATHS.has(path) || path.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`);
+  // Webhook and voice upload URLs carry a secret token in the path, so they never reach a trace.
+  return (
+    UNTRACED_REQUEST_PATHS.has(path) ||
+    path.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`) ||
+    path.startsWith(`${VoiceTranscription.VOICE_TRANSCRIPTION_ROUTE_PREFIX}/`)
+  );
 });
 
 export const withUntracedRequests = Layer.provide(layerUntracedRequests);
@@ -493,6 +501,91 @@ export const layerAttachmentUploadRoute = HttpRouter.add(
       ? HttpServerResponse.empty({ status: 204 })
       : HttpServerResponse.text(stored.detail, { status: stored.status });
   }),
+);
+
+const VOICE_TRANSCRIPTION_FAILURE_STATUS = {
+  invalid_upload: 400,
+  not_configured: 409,
+  upstream_rejected_credentials: 502,
+  upstream_failed: 502,
+  internal: 500,
+} as const satisfies Record<VoiceTranscriptionFailureCode, number>;
+
+const voiceTranscriptionFailure = (code: VoiceTranscriptionFailureCode, message: string) =>
+  HttpServerResponse.jsonUnsafe({ code, message } satisfies VoiceTranscriptionFailure, {
+    status: VOICE_TRANSCRIPTION_FAILURE_STATUS[code],
+    headers: { "cache-control": "no-store" },
+  });
+
+export const layerVoiceTranscriptionRoute = HttpRouter.add(
+  "POST",
+  `${VoiceTranscription.VOICE_TRANSCRIPTION_ROUTE_PREFIX}/*`,
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const voiceTranscription = yield* VoiceTranscription.VoiceTranscription;
+    const url = HttpServerRequest.toURL(request);
+    const claims = Option.isSome(url)
+      ? yield* voiceTranscription.verifyUploadToken(
+          url.value.pathname.slice(
+            `${VoiceTranscription.VOICE_TRANSCRIPTION_ROUTE_PREFIX}/`.length,
+          ),
+        )
+      : Option.none();
+    if (Option.isNone(claims)) {
+      return voiceTranscriptionFailure(
+        "invalid_upload",
+        "This transcription link is invalid or has expired.",
+      );
+    }
+    const { sizeBytes } = claims.value;
+    const contentLength = request.headers["content-length"];
+    // Tunnels may re-chunk the body. The read cap and transcribe's exact byte count still apply.
+    if (contentLength !== undefined && Number(contentLength) !== sizeBytes) {
+      return voiceTranscriptionFailure(
+        "invalid_upload",
+        `Content-Length must match the recording size of ${sizeBytes} bytes.`,
+      );
+    }
+    const audio = yield* request.arrayBuffer.pipe(
+      Effect.map((buffer) => new Uint8Array(buffer)),
+      Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(sizeBytes)),
+      Effect.option,
+    );
+    if (Option.isNone(audio)) {
+      return voiceTranscriptionFailure("invalid_upload", "Could not read the recording.");
+    }
+
+    return yield* voiceTranscription
+      .transcribe(claims.value, audio.value)
+      .pipe(
+        Effect.map((result) =>
+          HttpServerResponse.jsonUnsafe(result, { headers: { "cache-control": "no-store" } }),
+        ),
+      );
+  }).pipe(
+    Effect.catchTags({
+      VoiceTranscriptionNotConfiguredError: (error) =>
+        Effect.succeed(voiceTranscriptionFailure("not_configured", error.message)),
+      VoiceTranscriptionInvalidUploadError: (error) =>
+        Effect.succeed(voiceTranscriptionFailure("invalid_upload", error.message)),
+      VoiceTranscriptionInternalError: (error) =>
+        Effect.succeed(voiceTranscriptionFailure("internal", error.message)),
+      VoiceTranscriptionCredentialsRejectedError: (error) =>
+        Effect.logWarning("Voice transcription credentials were rejected upstream.", {
+          cause: error,
+        }).pipe(
+          Effect.as(voiceTranscriptionFailure("upstream_rejected_credentials", error.message)),
+        ),
+      VoiceTranscriptionUpstreamError: (error) =>
+        Effect.logWarning("Voice transcription failed upstream.", { cause: error }).pipe(
+          Effect.as(voiceTranscriptionFailure("upstream_failed", error.message)),
+        ),
+      AppleSpeechHelperError: (error) =>
+        Effect.logWarning("Voice transcription failed in the Apple speech helper.", {
+          cause: error,
+        }).pipe(Effect.as(voiceTranscriptionFailure("upstream_failed", error.message))),
+    }),
+  ),
 );
 
 const decodeBuildManifest = Schema.decodeUnknownEffect(

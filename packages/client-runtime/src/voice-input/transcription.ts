@@ -1,4 +1,9 @@
-/** Cancellation is cooperative: settle only after the underlying work has stopped. */
+/**
+ * Cancellation is cooperative. Work that holds a resource the controller owns, such as a
+ * native speech session or the recording file, settles only after that work has stopped.
+ * Work that holds nothing of the controller's, such as a URL mint or an in-memory decode,
+ * may settle as cancelled while it finishes in the background.
+ */
 export type VoiceTranscriptionOptions = {
   readonly signal: AbortSignal;
 };
@@ -19,13 +24,21 @@ export type VoiceTranscriptionErrorCode =
   | "transcription-failed"
   | "cancelled";
 
+/** `message` is shown to the user as written, so phrase it for them. */
 export class VoiceTranscriptionError extends Error {
   readonly code: VoiceTranscriptionErrorCode;
+  /** Sending the same recording again may succeed, as after a network or provider failure. */
+  readonly retryable: boolean;
 
-  constructor(code: VoiceTranscriptionErrorCode, message: string, options?: ErrorOptions) {
+  constructor(
+    code: VoiceTranscriptionErrorCode,
+    message: string,
+    options?: ErrorOptions & { readonly retryable?: boolean },
+  ) {
     super(message, options);
     this.name = "VoiceTranscriptionError";
     this.code = code;
+    this.retryable = options?.retryable ?? false;
   }
 }
 

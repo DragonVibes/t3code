@@ -1,6 +1,22 @@
 const COMPOSER_FOOTER_COMPACT_BREAKPOINT_PX = 620;
 const COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX = 780;
+/** Cancel, level meter, elapsed time, and the mic while voice input runs. */
+const COMPOSER_FOOTER_ACTIVE_VOICE_CONTROL_PX = 132;
 const RESTING_COMPOSER_IMAGE_THUMBNAIL_LIMIT = 3;
+
+export interface ComposerFooterCompactnessOptions {
+  hasWideActions?: boolean;
+  hasActiveVoiceControl?: boolean;
+}
+
+function composerFooterCompactBreakpoint(options?: ComposerFooterCompactnessOptions): number {
+  return (
+    (options?.hasWideActions
+      ? COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX
+      : COMPOSER_FOOTER_COMPACT_BREAKPOINT_PX) +
+    (options?.hasActiveVoiceControl ? COMPOSER_FOOTER_ACTIVE_VOICE_CONTROL_PX : 0)
+  );
+}
 
 export function getRestingComposerImagePreviewCounts(imageCount: number): {
   visibleCount: number;
@@ -15,12 +31,9 @@ export function getRestingComposerImagePreviewCounts(imageCount: number): {
 
 export function shouldUseCompactComposerFooter(
   width: number | null,
-  options?: { hasWideActions?: boolean },
+  options?: ComposerFooterCompactnessOptions,
 ): boolean {
-  const breakpoint = options?.hasWideActions
-    ? COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX
-    : COMPOSER_FOOTER_COMPACT_BREAKPOINT_PX;
-  return width !== null && width < breakpoint;
+  return width !== null && width < composerFooterCompactBreakpoint(options);
 }
 
 export function shouldUseRestingComposerLayout(input: {
@@ -92,12 +105,12 @@ export function shouldAnimateComposerRestingTransition(input: {
 
 export function shouldUseCompactComposerPrimaryActions(
   width: number | null,
-  options?: { hasWideActions?: boolean },
+  options?: ComposerFooterCompactnessOptions,
 ): boolean {
   if (!options?.hasWideActions) {
     return false;
   }
-  return width !== null && width < COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX;
+  return width !== null && width < composerFooterCompactBreakpoint(options);
 }
 
 export interface RestingComposerControlsMeasurement {

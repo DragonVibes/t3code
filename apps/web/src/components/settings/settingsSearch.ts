@@ -525,6 +525,36 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["generated thread titles source control content default provider"],
   },
   {
+    id: "voice-input-enabled",
+    title: "Voice input",
+    to: "/settings/general",
+    searchTerms: ["dictation microphone speech to text transcribe whisper record"],
+  },
+  {
+    id: "voice-input-provider",
+    title: "Voice input provider",
+    to: "/settings/general",
+    searchTerms: ["speech to text model openai groq xai grok whisper.cpp apple on-device"],
+  },
+  {
+    id: "voice-input-model",
+    title: "Voice input model",
+    to: "/settings/general",
+    searchTerms: ["speech to text preset base url endpoint gpt-transcribe whisper groq"],
+  },
+  {
+    id: "voice-input-language",
+    title: "Voice input language",
+    to: "/settings/general",
+    searchTerms: ["dictation transcription language locale"],
+  },
+  {
+    id: "voice-input-api-key",
+    title: "Voice input API key",
+    to: "/settings/general",
+    searchTerms: ["speech to text credential secret token"],
+  },
+  {
     id: "app-version",
     title: "Version",
     to: "/settings/general",

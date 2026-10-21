@@ -45,6 +45,7 @@ import {
   ancestorNodeModulesPaths,
   copyDirectoryPreservingSymlinks,
   LinuxBrowserSecretHostError,
+  stageAppleSpeechHelper,
   stageBrowserSecret,
   validateWindowsPackagedPayload,
   verifyPackagedBundleIsSelfContained,
@@ -471,6 +472,91 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.equal(yield* fs.readFileString(path.join(root, relativePath)), original);
       }
     }),
+  );
+
+  it.effect("ships the Apple speech helper only with mac builds and outside the asar", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const appleSpeech = {
+          from: "apps/desktop/prod-resources/apple-speech",
+          to: "apple-speech",
+        };
+        for (const platform of ["mac", "linux", "win"] as const) {
+          const config = yield* createBuildConfig(
+            platform,
+            platform === "mac" ? "dmg" : platform === "linux" ? "AppImage" : "nsis",
+            "0.0.33",
+            false,
+            false,
+            undefined,
+            undefined,
+          );
+          const extraResources = config.extraResources as ReadonlyArray<unknown>;
+          if (platform === "mac") {
+            assert.deepInclude(extraResources, appleSpeech);
+          } else {
+            assert.notDeepInclude(extraResources, appleSpeech);
+          }
+        }
+        assert.isTrue(
+          DESKTOP_FILE_EXCLUSIONS.some((glob) =>
+            NodePath.matchesGlob(
+              "apps/desktop/prod-resources/apple-speech/t3-apple-speech",
+              glob.slice(1),
+            ),
+          ),
+        );
+
+        const stageResourcesDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-apple-speech-" });
+        for (const platform of ["linux", "win"] as const) {
+          yield* stageAppleSpeechHelper({
+            repoRoot: stageResourcesDir,
+            stageResourcesDir,
+            platform,
+            arch: "x64",
+            verbose: false,
+          });
+        }
+        assert.isFalse(yield* fs.exists(path.join(stageResourcesDir, "apple-speech")));
+      }),
+    ),
+  );
+
+  it.effect.each(["15.5", "26.0"])(
+    "stages the Apple speech helper on mac only with a macOS 26 SDK (SDK %s)",
+    (sdkVersion) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const stageResourcesDir = yield* fs.makeTempDirectoryScoped({
+            prefix: "t3-apple-speech-sdk-",
+          });
+          const commands: Array<string> = [];
+          yield* stageAppleSpeechHelper({
+            repoRoot: stageResourcesDir,
+            stageResourcesDir,
+            platform: "mac",
+            arch: "arm64",
+            verbose: false,
+          }).pipe(
+            Effect.provideService(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make((command) => {
+                const { command: name, args } = command as unknown as {
+                  readonly command: string;
+                  readonly args: ReadonlyArray<string>;
+                };
+                commands.push([name, ...args].join(" "));
+                return Effect.succeed(mockProcess(0, name === "xcrun" ? `${sdkVersion}\n` : ""));
+              }),
+            ),
+          );
+          const builds = commands.filter((command) => command.includes("build.mjs"));
+          assert.lengthOf(builds, sdkVersion === "26.0" ? 1 : 0);
+        }),
+      ),
   );
 
   it.effect("omits update feeds for pull request preview builds", () =>

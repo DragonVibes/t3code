@@ -170,38 +170,60 @@ function resourceMonitorBinaryName(platform: NodeJS.Platform): string {
   return platform === "win32" ? "t3-resource-monitor.exe" : "t3-resource-monitor";
 }
 
+const resolveBundledHelperPath = Effect.fn("desktop.backendConfiguration.resolveBundledHelperPath")(
+  function* (input: {
+    readonly directory: string;
+    readonly binaryName: string;
+    readonly devBuildDirectories: ReadonlyArray<string>;
+  }) {
+    const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const candidates = environment.isDevelopment
+      ? input.devBuildDirectories.map((directory) =>
+          environment.path.join(environment.rootDir, directory, input.binaryName),
+        )
+      : environment.isPackaged
+        ? [environment.path.join(environment.resourcesPath, input.directory, input.binaryName)]
+        : environment.resolveResourcePathCandidates(
+            environment.path.join(input.directory, input.binaryName),
+          );
+
+    for (const candidate of candidates) {
+      if (yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
+        return Option.some(candidate);
+      }
+    }
+
+    return Option.none<string>();
+  },
+);
+
 const resolveResourceMonitorPath = Effect.fn(
   "desktop.backendConfiguration.resolveResourceMonitorPath",
 )(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const binaryName = resourceMonitorBinaryName(environment.platform);
-  const candidates = environment.isDevelopment
-    ? [
-        environment.path.join(
-          environment.rootDir,
-          "native/resource-monitor/target/release",
-          binaryName,
-        ),
-        environment.path.join(
-          environment.rootDir,
-          "native/resource-monitor/target/debug",
-          binaryName,
-        ),
-      ]
-    : environment.isPackaged
-      ? [environment.path.join(environment.resourcesPath, "resource-monitor", binaryName)]
-      : environment.resolveResourcePathCandidates(
-          environment.path.join("resource-monitor", binaryName),
-        );
+  return yield* resolveBundledHelperPath({
+    directory: "resource-monitor",
+    binaryName: resourceMonitorBinaryName(environment.platform),
+    devBuildDirectories: [
+      "native/resource-monitor/target/release",
+      "native/resource-monitor/target/debug",
+    ],
+  });
+});
 
-  for (const candidate of candidates) {
-    if (yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
-      return Option.some(candidate);
-    }
+const resolveAppleSpeechHelperPath = Effect.fn(
+  "desktop.backendConfiguration.resolveAppleSpeechHelperPath",
+)(function* () {
+  const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  if (environment.platform !== "darwin") {
+    return Option.none<string>();
   }
-
-  return Option.none<string>();
+  return yield* resolveBundledHelperPath({
+    directory: "apple-speech",
+    binaryName: "t3-apple-speech",
+    devBuildDirectories: ["native/apple-speech/build"],
+  });
 });
 
 const readPersistedBackendObservabilitySettings = Effect.gen(function* () {
@@ -500,6 +522,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
   function* (
     input: SharedBootstrapInput & {
       readonly resourceMonitorPath: Option.Option<string>;
+      readonly appleSpeechHelperPath: Option.Option<string>;
       readonly cliPath: Option.Option<string>;
       readonly shellEnvironmentPrepared: boolean;
     },
@@ -531,6 +554,10 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       ...Option.match(input.resourceMonitorPath, {
         onNone: () => ({}),
         onSome: (resourceMonitorPath) => ({ resourceMonitorPath }),
+      }),
+      ...Option.match(input.appleSpeechHelperPath, {
+        onNone: () => ({}),
+        onSome: (appleSpeechHelperPath) => ({ appleSpeechHelperPath }),
       }),
       ...buildObservabilityFragment(input.observabilitySettings),
     };
@@ -817,6 +844,10 @@ export const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
     );
+    const appleSpeechHelperPath = yield* resolveAppleSpeechHelperPath().pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
+    );
     const cliPath = yield* DesktopCliShim.install.pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
@@ -825,6 +856,7 @@ export const make = Effect.gen(function* () {
     return yield* resolvePrimaryStartConfig({
       ...shared,
       resourceMonitorPath,
+      appleSpeechHelperPath,
       cliPath,
       shellEnvironmentPrepared,
     }).pipe(

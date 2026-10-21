@@ -5869,6 +5869,10 @@ export default function ChatView(props: ChatViewProps) {
       "composer.effort": openComposerControl("composer.effort"),
       "composer.mode": openComposerControl("composer.mode"),
       "composer.workspace": openComposerControl("composer.workspace"),
+      "composer.toggleDictation": ({ event }) => {
+        if (event.repeat) return;
+        return composerRef.current?.toggleDictation() === true;
+      },
       "composer.cycleHost": ({ event }) => {
         if (!canChangeEnvironment) return false;
         if (event.repeat) return;

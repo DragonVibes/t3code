@@ -6,6 +6,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -18,11 +19,13 @@ import {
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import * as ServerConfig from "../config.ts";
+import * as AppleSpeechHelper from "../voiceTranscription/AppleSpeechHelper.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 
 const layerServerEnvironment = (baseDir: string) =>
   ServerEnvironment.layer.pipe(
     Layer.provide(ServerSecretStore.layer),
+    Layer.provide(AppleSpeechHelper.layerUnavailable),
     Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
 
@@ -98,6 +101,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
           Effect.provide(
             ServerEnvironment.layer.pipe(
               Layer.provide(layerEmptySecretStore),
+              Layer.provide(AppleSpeechHelper.layerUnavailable),
               Layer.provide(ServerConfig.layer({ ...config, mode })),
             ),
           ),
@@ -228,6 +232,40 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
     }),
   );
 
+  it.effect.each([true, false])(
+    "advertises Apple on-device transcription as %s from the helper's latest answer",
+    (available) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-server-environment-apple-speech-test-",
+        });
+        const descriptor = yield* Effect.gen(function* () {
+          const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+          return yield* serverEnvironment.getDescriptor;
+        }).pipe(
+          Effect.provide(
+            ServerEnvironment.layer.pipe(
+              Layer.provide(ServerSecretStore.layer),
+              Layer.provide(
+                Layer.succeed(
+                  AppleSpeechHelper.AppleSpeechHelper,
+                  AppleSpeechHelper.AppleSpeechHelper.of({
+                    available: Effect.succeed(available),
+                    streamAvailableChanges: Stream.make(available),
+                    availability: Effect.die("the descriptor must not wait for a probe"),
+                    transcribe: () => Effect.die("unused"),
+                  }),
+                ),
+              ),
+              Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+            ),
+          ),
+        );
+        expect(descriptor.capabilities.appleOnDeviceTranscription).toBe(available);
+      }),
+  );
+
   it.effect("reports agent activity publishing from the current secret state", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -235,7 +273,10 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         prefix: "t3-server-environment-publish-test-",
       });
       const layerTest = Layer.mergeAll(
-        ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer)),
+        ServerEnvironment.layer.pipe(
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provide(AppleSpeechHelper.layerUnavailable),
+        ),
         ServerSecretStore.layer,
       ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)));
 
