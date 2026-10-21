@@ -1,5 +1,5 @@
 import type { VoiceRecorderStatus } from "@t3tools/client-runtime/voice-input";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   createWebVoiceRecorder,
@@ -33,17 +33,21 @@ class FakeMediaRecorder implements MediaRecorderLike {
 
   stop(): void {
     if (this.state === "inactive") throw new DOMException("not recording", "InvalidStateError");
-    this.endRecording();
+    this.simulateTracksEnded();
   }
 
-  /** What the browser does when every track of the stream ends. */
-  endRecording(): void {
+  simulateTracksEnded(): void {
     this.state = "inactive";
     for (const listener of this.listeners.get("dataavailable") ?? []) {
       listener({ data: this.chunk } as never);
     }
     for (const listener of this.listeners.get("stop") ?? []) listener(undefined as never);
   }
+}
+
+function fakeTimers(): Disposable {
+  vi.useFakeTimers();
+  return { [Symbol.dispose]: () => void vi.useRealTimers() };
 }
 
 function createFakeStream() {
@@ -74,7 +78,7 @@ function createHarness(overrides: Partial<VoiceRecorderEnvironment> = {}) {
     revokeObjectURL: (url) => {
       revoked.push(url);
     },
-    denialIsPermanent: false,
+    deniedBy: "browser",
     ...overrides,
   };
   const web = createWebVoiceRecorder(environment, (status) => statuses.push(status));
@@ -88,7 +92,7 @@ async function startRecording(harness: ReturnType<typeof createHarness>, forDura
   harness.web.recorder.record({ forDuration });
 }
 
-function refusal(name: "NotAllowedError" | "SecurityError") {
+function refusal(name: "NotAllowedError" | "SecurityError" | "NotFoundError" | "NotReadableError") {
   return async () => {
     throw new DOMException("refused", name);
   };
@@ -102,15 +106,12 @@ const finished = (url: string): VoiceRecorderStatus => ({
 });
 
 describe("createWebVoiceRecorder", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it("records into a blob URL that exists only after stop, then turns the microphone off", async () => {
+    using _now = vi.spyOn(Date, "now").mockReturnValue(1_000);
     const harness = createHarness();
     await startRecording(harness);
     expect(harness.web.recorder.uri).toBeNull();
-    expect(harness.web.startedAt).not.toBeNull();
+    expect(harness.web.startedAt).toBe(1_000);
     expect(harness.recorders[0]?.options).toEqual({ mimeType: "audio/webm;codecs=opus" });
 
     await harness.web.recorder.stop();
@@ -143,7 +144,7 @@ describe("createWebVoiceRecorder", () => {
     await harness.web.requestPermission();
     await harness.web.configureRecording();
     await harness.web.recorder.prepareToRecordAsync();
-    vi.useFakeTimers();
+    using _timers = fakeTimers();
     harness.web.recorder.record({ forDuration: 2 });
     await vi.advanceTimersByTimeAsync(1_999);
     expect(harness.statuses).toEqual([]);
@@ -154,7 +155,7 @@ describe("createWebVoiceRecorder", () => {
   it("hands over what it captured when the microphone ends on its own", async () => {
     const harness = createHarness();
     await startRecording(harness);
-    harness.recorders[0]!.endRecording();
+    harness.recorders[0]!.simulateTracksEnded();
     expect(harness.statuses).toEqual([finished("blob:recording-1")]);
     await harness.web.recorder.stop();
     expect(harness.statuses).toHaveLength(1);
@@ -205,10 +206,7 @@ describe("createWebVoiceRecorder", () => {
     });
     expect(await blocked.web.requestPermission()).toEqual({ granted: false, canAskAgain: false });
 
-    const desktop = createHarness({
-      getUserMedia: refusal("NotAllowedError"),
-      denialIsPermanent: true,
-    });
+    const desktop = createHarness({ getUserMedia: refusal("NotAllowedError"), deniedBy: "os" });
     expect(await desktop.web.requestPermission()).toEqual({ granted: false, canAskAgain: false });
 
     const insecure = createHarness({
@@ -216,12 +214,26 @@ describe("createWebVoiceRecorder", () => {
       queryMicrophonePermission: async () => null,
     });
     expect(await insecure.web.requestPermission()).toEqual({ granted: false, canAskAgain: false });
+  });
 
-    const broken = createHarness({
+  it("names a missing or busy microphone instead of a generic failure", async () => {
+    const missing = createHarness({ getUserMedia: refusal("NotFoundError") });
+    await expect(missing.web.requestPermission()).rejects.toMatchObject({
+      name: "VoiceRecorderError",
+      message: expect.stringContaining("No microphone"),
+    });
+
+    const busy = createHarness({ getUserMedia: refusal("NotReadableError") });
+    await expect(busy.web.requestPermission()).rejects.toMatchObject({
+      name: "VoiceRecorderError",
+      message: expect.stringContaining("Another app"),
+    });
+
+    const unknown = createHarness({
       getUserMedia: async () => {
-        throw new DOMException("no device", "NotFoundError");
+        throw new DOMException("odd", "AbortError");
       },
     });
-    await expect(broken.web.requestPermission()).rejects.toMatchObject({ name: "NotFoundError" });
+    await expect(unknown.web.requestPermission()).rejects.toMatchObject({ name: "AbortError" });
   });
 });

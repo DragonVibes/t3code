@@ -14,7 +14,7 @@ describe("voice input metering", () => {
   it("grows with the signal between the noise floor and full scale", () => {
     const quiet = normalizeVoiceInputDecibels(voiceInputDecibelsFromByteSamples([129, 127]));
     const speech = normalizeVoiceInputDecibels(voiceInputDecibelsFromByteSamples([160, 96]));
-    expect(quiet).toBeGreaterThanOrEqual(0);
+    expect(quiet).toBeGreaterThan(0);
     expect(speech).toBeGreaterThan(quiet);
     expect(speech).toBeLessThan(1);
   });

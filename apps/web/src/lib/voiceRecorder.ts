@@ -1,6 +1,7 @@
 import {
   normalizeVoiceInputDecibels,
   voiceInputDecibelsFromByteSamples,
+  VoiceRecorderError,
   type VoiceRecorder,
   type VoiceRecorderStatus,
 } from "@t3tools/client-runtime/voice-input";
@@ -36,7 +37,8 @@ export interface VoiceRecorderEnvironment {
   readonly createLevelMeter: (stream: MediaStream) => VoiceLevelMeter | null;
   readonly createObjectURL: (blob: Blob) => string;
   readonly revokeObjectURL: (url: string) => void;
-  readonly denialIsPermanent: boolean;
+  /** Who refused a microphone request. The OS cannot be asked again from the page. */
+  readonly deniedBy: "os" | "browser";
 }
 
 export interface WebVoiceRecorder {
@@ -60,6 +62,32 @@ function isPermissionRefusal(error: unknown): error is DOMException {
   );
 }
 
+function describeMicrophoneFailure(error: unknown): VoiceRecorderError | null {
+  if (!(error instanceof DOMException)) return null;
+  switch (error.name) {
+    case "NotFoundError":
+    case "OverconstrainedError":
+      return new VoiceRecorderError("No microphone was found. Connect one and try again.", {
+        cause: error,
+      });
+    case "NotReadableError":
+      return new VoiceRecorderError(
+        "The microphone could not be started. Another app may be using it.",
+        { cause: error },
+      );
+    default:
+      return null;
+  }
+}
+
+async function openMicrophone(environment: VoiceRecorderEnvironment): Promise<MediaStream> {
+  try {
+    return await environment.getUserMedia({ audio: true });
+  } catch (error) {
+    throw describeMicrophoneFailure(error) ?? error;
+  }
+}
+
 export function createWebVoiceRecorder(
   environment: VoiceRecorderEnvironment,
   onStatus: (status: VoiceRecorderStatus) => void,
@@ -68,18 +96,22 @@ export function createWebVoiceRecorder(
   let stream: MediaStream | null = null;
   let meter: VoiceLevelMeter | null = null;
   let mediaRecorder: MediaRecorderLike | null = null;
-  let started = false;
+  let stopEventPending = false;
   let stopRequested = false;
   let stopped: Promise<void> | null = null;
   let chunks: Blob[] = [];
   let recordingUri: string | null = null;
   let limitTimer: ReturnType<typeof setTimeout> | null = null;
   let startedAt: number | null = null;
-  let releases = 0;
+  let releaseGeneration = 0;
 
   const clearLimitTimer = () => {
     if (limitTimer !== null) clearTimeout(limitTimer);
     limitTimer = null;
+  };
+
+  const handleTracksEnded = () => {
+    onStatus({ isFinished: true, hasError: false, error: null, url: recordingUri });
   };
 
   const recorder: VoiceRecorder = {
@@ -105,11 +137,7 @@ export function createWebVoiceRecorder(
         clearLimitTimer();
         startedAt = null;
         resolve();
-        // A stop nobody asked for means the tracks ended, such as a device
-        // unplugged, so hand over what was captured instead of recording forever.
-        if (!stopRequested) {
-          onStatus({ isFinished: true, hasError: false, error: null, url: recordingUri });
-        }
+        if (!stopRequested) handleTracksEnded();
       });
       next.addEventListener("error", () => {
         onStatus({
@@ -120,7 +148,7 @@ export function createWebVoiceRecorder(
         });
       });
       mediaRecorder = next;
-      started = false;
+      stopEventPending = false;
       stopRequested = false;
       stopped = promise;
     },
@@ -128,7 +156,7 @@ export function createWebVoiceRecorder(
       if (!mediaRecorder) throw new Error("The recorder is not prepared.");
       clearLimitTimer();
       mediaRecorder.start();
-      started = true;
+      stopEventPending = true;
       startedAt = Date.now();
       limitTimer = setTimeout(() => {
         void recorder
@@ -142,16 +170,14 @@ export function createWebVoiceRecorder(
       clearLimitTimer();
       const current = mediaRecorder;
       if (!current) return;
-      // A recorder that never started fires no stop event, and one whose
-      // tracks ended already fired it.
-      if (started) {
+      if (stopEventPending) {
         stopRequested = true;
         if (current.state !== "inactive") current.stop();
         await stopped;
       }
       mediaRecorder = null;
       stopped = null;
-      started = false;
+      stopEventPending = false;
       startedAt = null;
     },
   };
@@ -164,31 +190,29 @@ export function createWebVoiceRecorder(
     requestPermission: async () => {
       stopTracks(promptedStream);
       promptedStream = null;
-      const releasesBefore = releases;
+      const generationAtPrompt = releaseGeneration;
       try {
-        const granted = await environment.getUserMedia({ audio: true });
-        // A cancel while the prompt was open already released, so this stream
-        // has no owner left to stop it later.
-        if (releases !== releasesBefore) stopTracks(granted);
+        const granted = await openMicrophone(environment);
+        if (releaseGeneration !== generationAtPrompt) stopTracks(granted);
         else promptedStream = granted;
         return { granted: true, canAskAgain: true };
       } catch (error) {
         if (!isPermissionRefusal(error)) throw error;
         // A SecurityError means the origin itself cannot ask, so retrying cannot help.
         const state =
-          environment.denialIsPermanent || error.name === "SecurityError"
+          environment.deniedBy === "os" || error.name === "SecurityError"
             ? "denied"
             : await environment.queryMicrophonePermission();
         return { granted: false, canAskAgain: state !== "denied" };
       }
     },
     configureRecording: async () => {
-      stream = promptedStream ?? (await environment.getUserMedia({ audio: true }));
+      stream = promptedStream ?? (await openMicrophone(environment));
       promptedStream = null;
       meter = environment.createLevelMeter(stream);
     },
     releaseRecording: async () => {
-      releases += 1;
+      releaseGeneration += 1;
       clearLimitTimer();
       meter?.close();
       meter = null;
@@ -247,7 +271,6 @@ export function createBrowserVoiceRecorderEnvironment(): VoiceRecorderEnvironmen
     createLevelMeter: createAnalyserLevelMeter,
     createObjectURL: (blob) => URL.createObjectURL(blob),
     revokeObjectURL: (url) => URL.revokeObjectURL(url),
-    // Electron grants the page's request itself, so a refusal can only come from the OS.
-    denialIsPermanent: isElectron,
+    deniedBy: isElectron ? "os" : "browser",
   };
 }

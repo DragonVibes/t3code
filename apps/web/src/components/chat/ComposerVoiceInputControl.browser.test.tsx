@@ -19,7 +19,7 @@ function control(
       <ComposerVoiceInputControl
         state={state}
         shortcutLabel="⌘⇧Space"
-        errorContext={{ secureContext: true, canOpenSystemSettings: false }}
+        errorContext={{ secureContext: true, permissionHost: "browser" }}
         readStartedAt={() => null}
         readLevel={() => 0}
         onToggle={() => {}}
@@ -98,7 +98,7 @@ describe("ComposerVoiceInputControl", () => {
     await using screen = await render(
       control(denied, {
         onOpenSettings,
-        errorContext: { secureContext: true, canOpenSystemSettings: true },
+        errorContext: { secureContext: true, permissionHost: "macos" },
       }),
     );
     expect(screen.container.querySelector('[role="alert"]')?.textContent).toContain(

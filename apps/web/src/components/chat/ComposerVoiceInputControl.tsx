@@ -3,10 +3,7 @@ import { CircleAlertIcon, MicIcon, XIcon } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useMediaQuery } from "~/hooks/useMediaQuery";
-import {
-  canOpenMicrophoneSystemSettings,
-  openMicrophoneSystemSettings,
-} from "~/lib/microphoneSettings";
+import { microphonePermissionHost, openMicrophoneSystemSettings } from "~/lib/microphoneSettings";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
@@ -22,7 +19,7 @@ const VOICE_METER_REST_SCALE = 0.15;
 
 const BROWSER_ERROR_CONTEXT: VoiceInputErrorContext = {
   secureContext: typeof window !== "undefined" && window.isSecureContext,
-  canOpenSystemSettings: canOpenMicrophoneSystemSettings,
+  permissionHost: microphonePermissionHost,
 };
 
 export function formatVoiceElapsed(seconds: number): string {
