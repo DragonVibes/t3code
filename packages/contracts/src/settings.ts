@@ -778,6 +778,24 @@ export const AntigravitySettings = makeProviderSettingsSchema(
 );
 export type AntigravitySettings = typeof AntigravitySettings.Type;
 
+export const DEFAULT_VOICE_TRANSCRIPTION_BASE_URL = "https://api.openai.com/v1";
+export const DEFAULT_VOICE_TRANSCRIPTION_MODEL = "gpt-transcribe";
+
+/** Any OpenAI-compatible `/audio/transcriptions` endpoint: OpenAI, Groq, a whisper.cpp server. */
+export const VoiceTranscriptionSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  baseUrl: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_VOICE_TRANSCRIPTION_BASE_URL)),
+  ),
+  model: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_VOICE_TRANSCRIPTION_MODEL)),
+  ),
+  /** ISO-639-1 code. Empty lets the model detect the language. */
+  language: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  apiKey: TrimmedString.pipe(secretSetting, Schema.withDecodingDefault(Effect.succeed(""))),
+});
+export type VoiceTranscriptionSettings = typeof VoiceTranscriptionSettings.Type;
+
 export const UsageLimitSourceConfig = Schema.Struct({
   kind: Schema.Literal("cliproxy"),
   label: Schema.optional(TrimmedNonEmptyString),
@@ -1255,6 +1273,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  voiceTranscription: VoiceTranscriptionSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   sourceControlHosts: Schema.Record(Schema.String, SourceControlHostSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1518,6 +1539,16 @@ export const ServerSettingsPatch = Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),
       otlpMetricsUrl: Schema.optionalKey(TrimmedString),
       otlpLogsUrl: Schema.optionalKey(TrimmedString),
+    }),
+  ),
+  /** An omitted `apiKey` keeps the saved key; an empty one removes it. */
+  voiceTranscription: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      baseUrl: Schema.optionalKey(TrimmedString),
+      model: Schema.optionalKey(TrimmedString),
+      language: Schema.optionalKey(TrimmedString),
+      apiKey: Schema.optionalKey(TrimmedString),
     }),
   ),
   /**
