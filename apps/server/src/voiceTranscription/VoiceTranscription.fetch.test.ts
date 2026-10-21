@@ -59,7 +59,7 @@ const processFailures = Effect.acquireRelease(
     }),
 );
 
-// undici's crash comes from a detached promise of its own, so no milestone marks when it would land.
+// Not needed to pass. It gives a returning undici crash, which no event marks, time to land.
 const settleProcess = Effect.sleep("200 millis");
 
 const transcribeAgainst = (answer: Upstream) =>
