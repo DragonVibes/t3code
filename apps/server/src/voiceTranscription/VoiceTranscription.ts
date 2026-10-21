@@ -21,6 +21,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http";
 
 import { loadUploadSigningSecret } from "../assets/AttachmentUpload.ts";
@@ -38,6 +39,7 @@ export const VOICE_TRANSCRIPTION_ROUTE_PREFIX = "/api/voice/transcriptions";
 
 const UPSTREAM_TIMEOUT_SECONDS = 90;
 const UPSTREAM_MESSAGE_MAX_LENGTH = 300;
+const UPSTREAM_BODY_MAX_BYTES = 1024 * 1024;
 
 export class VoiceTranscriptionInvalidUploadError extends Schema.TaggedError<VoiceTranscriptionInvalidUploadError>()(
   "VoiceTranscriptionInvalidUploadError",
@@ -87,6 +89,17 @@ export class VoiceTranscriptionUpstreamError extends Schema.TaggedError<VoiceTra
   }
 }
 
+class VoiceTranscriptionUpstreamBodyTooLargeError extends Schema.TaggedError<VoiceTranscriptionUpstreamBodyTooLargeError>()(
+  "VoiceTranscriptionUpstreamBodyTooLargeError",
+  {
+    maxBytes: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `The transcription service answered with more than ${this.maxBytes} bytes.`;
+  }
+}
+
 const VoiceTranscriptionClaims = Schema.Struct({
   version: Schema.Literal(1),
   kind: Schema.Literal("voice-transcription"),
@@ -102,7 +115,9 @@ const claimsJson = Schema.fromJsonString(VoiceTranscriptionClaims);
 const decodeClaims = Schema.decodeUnknownOption(claimsJson);
 const encodeClaims = Schema.encodeSync(claimsJson);
 
-const decodeTranscript = Schema.decodeUnknownEffect(Schema.Struct({ text: Schema.String }));
+const decodeTranscript = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ text: Schema.String })),
+);
 // OpenAI nests the message under `error`; some compatible servers send `error` as a plain string.
 const decodeUpstreamError = Schema.decodeUnknownOption(
   Schema.fromJsonString(
@@ -305,11 +320,30 @@ const make = Effect.gen(function* () {
     return endpoint;
   });
 
+  const readUpstreamText = Effect.fn("VoiceTranscription.readUpstreamText")(function* (
+    response: HttpClientResponse.HttpClientResponse,
+  ) {
+    const decoder = new TextDecoder();
+    let text = "";
+    let receivedBytes = 0;
+    yield* Stream.runForEach(response.stream, (chunk) => {
+      receivedBytes += chunk.byteLength;
+      if (receivedBytes > UPSTREAM_BODY_MAX_BYTES) {
+        return new VoiceTranscriptionUpstreamBodyTooLargeError({
+          maxBytes: UPSTREAM_BODY_MAX_BYTES,
+        });
+      }
+      text += decoder.decode(chunk, { stream: true });
+      return Effect.void;
+    });
+    return text + decoder.decode();
+  });
+
   const readUpstreamCause = Effect.fn("VoiceTranscription.readUpstreamCause")(function* (
     response: HttpClientResponse.HttpClientResponse,
     apiKey: string,
   ) {
-    const body = yield* response.text.pipe(Effect.option);
+    const body = yield* readUpstreamText(response).pipe(Effect.option);
     const reported = Option.getOrUndefined(Option.flatMap(body, decodeUpstreamError));
     if (reported === undefined) return undefined;
     const message = typeof reported.error === "string" ? reported.error : reported.error.message;
@@ -423,7 +457,7 @@ const make = Effect.gen(function* () {
           cause: yield* readUpstreamCause(response, endpoint.apiKey),
         });
       }
-      const { text } = yield* response.json.pipe(
+      const { text } = yield* readUpstreamText(response).pipe(
         Effect.flatMap(decodeTranscript),
         Effect.mapError((cause) => upstreamError({ stage: "response", cause })),
       );

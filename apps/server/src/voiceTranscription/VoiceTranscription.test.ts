@@ -450,6 +450,39 @@ describe("VoiceTranscription", () => {
     },
   );
 
+  it.effect.each([200, 500])("stops reading an upstream HTTP %s body past 1 MiB", (status) => {
+    const chunk = new Uint8Array(64 * 1024).fill(0x61);
+    let sentBytes = 0;
+    const { layer } = setup({}, () =>
+      Effect.succeed(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull: (controller) => {
+              if (sentBytes > 2 * 1024 * 1024) return new Promise<void>(() => {});
+              sentBytes += chunk.byteLength;
+              controller.enqueue(chunk);
+            },
+          }),
+          { status },
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      const response = yield* post((yield* mint).relativeUrl);
+      expect(response).toEqual({
+        status: 502,
+        body: {
+          code: "upstream_failed",
+          message:
+            status === 200
+              ? "The transcription service at api.openai.com returned an unexpected response."
+              : "The transcription service at api.openai.com answered HTTP 500.",
+        },
+      });
+      expect(sentBytes).toBeLessThan(2 * 1024 * 1024);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("answers internal when the settings cannot be read", () => {
     const { layer } = setup({}, undefined, undefined, {
       settingsService: Layer.mock(ServerSettings.ServerSettingsService)({
