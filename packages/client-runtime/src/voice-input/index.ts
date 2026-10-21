@@ -10,6 +10,15 @@ export {
   type VoiceRecorderStatus,
 } from "./controller.ts";
 export {
+  createEnvironmentVoiceTranscriber,
+  type EnvironmentVoiceTranscriberDependencies,
+} from "./environmentTranscriber.ts";
+export {
+  normalizeVoiceInputDecibels,
+  voiceInputDecibelsFromByteSamples,
+  VOICE_WAVEFORM_SAMPLE_COUNT,
+} from "./metering.ts";
+export {
   VoiceTranscriptionError,
   throwIfVoiceTranscriptionAborted,
   type PreparedVoiceTranscription,

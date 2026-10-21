@@ -1,6 +1,10 @@
 import { replaceTextRange } from "@t3tools/shared/composerTrigger";
 
-import type { PreparedVoiceTranscription, VoiceTranscriber } from "./transcription.ts";
+import {
+  VoiceTranscriptionError,
+  type PreparedVoiceTranscription,
+  type VoiceTranscriber,
+} from "./transcription.ts";
 
 export const VOICE_RECORDING_LIMIT_SECONDS = 5 * 60;
 
@@ -167,6 +171,7 @@ function preparationErrorMessage(error: unknown): string {
   if (errorCode(error) === "unsupported-locale") {
     return "Voice transcription is not available for this language.";
   }
+  if (error instanceof VoiceTranscriptionError) return error.message;
   return "Could not prepare voice transcription.";
 }
 
@@ -174,6 +179,9 @@ function transcriptionErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message === "voice-operation-busy") {
     return "Voice transcription is still finishing. Try again shortly.";
   }
+  // Transcribers phrase their failures for the user, such as the environment's own
+  // reason for rejecting an upload. Anything else is an unexpected defect.
+  if (error instanceof VoiceTranscriptionError) return error.message;
   return "Could not transcribe this recording.";
 }
 

@@ -24,8 +24,8 @@ import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { AppText as Text } from "../../components/ui/AppText";
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
 import { cn } from "../../lib/cn";
+import { VOICE_WAVEFORM_SAMPLE_COUNT } from "@t3tools/client-runtime/voice-input";
 import type { VoiceComposerPresentation } from "./voiceInputPresentation";
-import { VOICE_WAVEFORM_SAMPLE_COUNT } from "./voiceInputMetering";
 
 const DICTATION_TIMING = {
   duration: 220,
