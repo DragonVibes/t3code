@@ -557,6 +557,8 @@ export const layerVoiceTranscriptionRoute = HttpRouter.add(
           Effect.succeed(voiceTranscriptionFailure("not_configured", error.message)),
         VoiceTranscriptionInvalidUploadError: (error) =>
           Effect.succeed(voiceTranscriptionFailure("invalid_upload", error.message)),
+        VoiceTranscriptionUnsupportedFormatError: (error) =>
+          Effect.succeed(voiceTranscriptionFailure("invalid_upload", error.message)),
         VoiceTranscriptionCredentialsRejectedError: (error) =>
           Effect.succeed(voiceTranscriptionFailure("upstream_rejected_credentials", error.message)),
         VoiceTranscriptionUpstreamError: (error) =>

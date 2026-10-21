@@ -1,6 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import type { VoiceTranscriptionSettings } from "@t3tools/contracts";
+import type {
+  VoiceTranscriptionAudioMimeType,
+  VoiceTranscriptionSettings,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -51,10 +54,18 @@ function setup(
   return { layer, requests };
 }
 
-const mint = Effect.gen(function* () {
-  const voice = yield* VoiceTranscription.VoiceTranscription;
-  return yield* voice.createUploadUrl({ mimeType: "audio/webm", sizeBytes: audio.byteLength });
-});
+const mintAs = (mimeType: VoiceTranscriptionAudioMimeType) =>
+  Effect.gen(function* () {
+    const voice = yield* VoiceTranscription.VoiceTranscription;
+    return yield* voice.createUploadUrl({ mimeType, sizeBytes: audio.byteLength });
+  });
+const mint = mintAs("audio/webm");
+
+const xai = {
+  provider: "xai",
+  baseUrl: "https://api.x.ai/v1",
+  model: "grok-voice-transcribe-2.0",
+} as const;
 
 const post = (
   relativeUrl: string,
@@ -155,6 +166,8 @@ describe("VoiceTranscription", () => {
   it.effect.each([
     { settings: { enabled: false }, message: "turned off" },
     { settings: { apiKey: "" }, message: "OpenAI API key" },
+    { settings: { ...xai, apiKey: "" }, message: "xAI API key" },
+    { settings: xai, message: "xAI does not accept audio/webm recordings." },
     { settings: { model: "" }, message: "model name" },
     { settings: { baseUrl: "" }, message: "endpoint URL" },
     { settings: { baseUrl: "ftp://whisper.local" }, message: "not valid" },
@@ -215,6 +228,53 @@ describe("VoiceTranscription", () => {
       }).pipe(Effect.provide(layer));
     },
   );
+
+  it.effect.each([
+    { language: "en", fields: ["model", "language", "file"] },
+    { language: "", fields: ["model", "file"] },
+  ])(
+    "transcribes through xAI speech-to-text with language hint '$language' and the file last",
+    ({ language, fields }) => {
+      const { layer, requests } = setup({ ...xai, language }, () =>
+        Effect.succeed(
+          Response.json({ text: "hello grok", language: "en", duration: 1.2, words: [] }),
+        ),
+      );
+      return Effect.gen(function* () {
+        const response = yield* post((yield* mintAs("audio/wav")).relativeUrl);
+
+        expect(response).toEqual({ status: 200, body: { text: "hello grok" } });
+        expect(requests).toHaveLength(1);
+        const request = requests[0]!;
+        expect(request.method).toBe("POST");
+        expect(request.url).toBe("https://api.x.ai/v1/stt");
+        expect(request.headers.authorization).toBe("Bearer sk-test");
+        const form = formOf(request);
+        expect([...form.keys()]).toEqual(fields);
+        expect(form.get("model")).toBe("grok-voice-transcribe-2.0");
+        expect(form.getAll("language")).toEqual(language ? [language] : []);
+        const file = form.get("file") as File;
+        expect(file.name).toBe("audio.wav");
+        expect(file.type).toBe("audio/wav");
+        expect(new Uint8Array(yield* Effect.promise(() => file.arrayBuffer()))).toEqual(audio);
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
+  it.effect("refuses a WebM upload minted before switching to xAI without calling upstream", () => {
+    const { layer, requests } = setup({});
+    return Effect.gen(function* () {
+      const issued = yield* mint;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ voiceTranscription: xai });
+      const response = yield* post(issued.relativeUrl);
+      expect(response).toEqual({
+        status: 400,
+        body: { code: "invalid_upload", message: "xAI does not accept audio/webm recordings." },
+      });
+      expect(requests).toHaveLength(0);
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect.each([
     {
