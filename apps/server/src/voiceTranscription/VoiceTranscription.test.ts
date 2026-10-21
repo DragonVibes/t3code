@@ -16,6 +16,7 @@ import {
   HttpClient,
   type HttpClientRequest,
   HttpClientResponse,
+  HttpMiddleware,
   HttpRouter,
   HttpServerRequest,
   HttpServerResponse,
@@ -149,6 +150,7 @@ describe("VoiceTranscription", () => {
           Effect.succeedSome({
             version: 1,
             kind: "voice-transcription",
+            nonce: "nonce",
             mimeType: "audio/webm",
             sizeBytes: audio.byteLength,
             expiresAt: Number.MAX_SAFE_INTEGER,
@@ -488,7 +490,6 @@ describe("VoiceTranscription", () => {
     () => {
       const { layer, requests } = setup({});
       return Effect.gen(function* () {
-        const issued = yield* mint;
         const attachment = yield* issueAttachmentUploadUrl({
           type: "file",
           name: "audio.webm",
@@ -497,16 +498,17 @@ describe("VoiceTranscription", () => {
         });
         const attachmentToken = attachment.relativeUrl.split("/").at(-1)!;
         const rejected = [
-          yield* post(`${issued.relativeUrl}x`),
+          yield* post(`${(yield* mint).relativeUrl}x`),
           yield* post(`/api/voice/transcriptions/${attachmentToken}`),
-          yield* post(issued.relativeUrl, { contentLength: audio.byteLength + 1 }),
-          yield* post(issued.relativeUrl, {
+          yield* post((yield* mint).relativeUrl, { contentLength: audio.byteLength + 1 }),
+          yield* post((yield* mint).relativeUrl, {
             body: audio.slice(1),
             contentLength: audio.byteLength - 1,
           }),
         ];
+        const expiring = yield* mint;
         yield* TestClock.adjust("2 minutes");
-        rejected.push(yield* post(issued.relativeUrl));
+        rejected.push(yield* post(expiring.relativeUrl));
 
         for (const response of rejected) {
           expect(response.status).toBe(400);
@@ -515,6 +517,46 @@ describe("VoiceTranscription", () => {
         expect(requests).toHaveLength(0);
       }).pipe(Effect.provide(layer));
     },
+  );
+
+  it.effect("accepts each upload link once", () => {
+    const { layer, requests } = setup({});
+    return Effect.gen(function* () {
+      const issued = yield* mint;
+      expect((yield* post(issued.relativeUrl)).status).toBe(200);
+      expect(yield* post(issued.relativeUrl)).toEqual({
+        status: 400,
+        body: {
+          code: "invalid_upload",
+          message: "This transcription link is invalid or has expired.",
+        },
+      });
+      expect((yield* post((yield* mint).relativeUrl)).status).toBe(200);
+      expect(requests).toHaveLength(2);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("keeps upload links out of traces", () =>
+    Effect.gen(function* () {
+      const traced = yield* Deferred.make<(path: string) => boolean>();
+      yield* Layer.build(
+        ServerHttp.withUntracedRequests(
+          Layer.effectDiscard(
+            Effect.gen(function* () {
+              const disabled = yield* HttpMiddleware.TracerDisabledWhen;
+              yield* Deferred.succeed(
+                traced,
+                (path) =>
+                  !disabled(HttpServerRequest.fromWeb(new Request(`http://t3.test${path}`))),
+              );
+            }),
+          ),
+        ),
+      );
+      const isTraced = yield* Deferred.await(traced);
+      expect(isTraced("/api/voice/transcriptions/payload.signature")).toBe(false);
+      expect(isTraced("/api/attachments/upload/payload.signature")).toBe(true);
+    }).pipe(Effect.scoped),
   );
 
   it.effect("answers not_configured when transcription is turned off after minting", () => {

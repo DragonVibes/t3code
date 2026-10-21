@@ -13,10 +13,12 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http";
 
@@ -87,6 +89,8 @@ export class VoiceTranscriptionUpstreamError extends Schema.TaggedError<VoiceTra
 const VoiceTranscriptionClaims = Schema.Struct({
   version: Schema.Literal(1),
   kind: Schema.Literal("voice-transcription"),
+  /** Keeps two otherwise identical links distinct, since each is accepted once. */
+  nonce: Schema.String,
   mimeType: VoiceTranscriptionAudioMimeType,
   sizeBytes: Schema.Number,
   expiresAt: Schema.Number,
@@ -238,6 +242,8 @@ const make = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const client = yield* HttpClient.HttpClient;
   const appleSpeech = yield* AppleSpeechHelper.AppleSpeechHelper;
+  const crypto = yield* Crypto.Crypto;
+  const consumedSignatures = yield* Ref.make(new Map<string, number>());
 
   const signingSecret = loadUploadSigningSecret.pipe(
     Effect.provideService(ServerSecretStore.ServerSecretStore, secretStore),
@@ -317,6 +323,7 @@ const make = Effect.gen(function* () {
       encodeClaims({
         version: 1,
         kind: "voice-transcription",
+        nonce: yield* crypto.randomUUIDv4().pipe(Effect.orDie),
         mimeType: input.mimeType,
         sizeBytes: input.sizeBytes,
         expiresAt,
@@ -344,7 +351,14 @@ const make = Effect.gen(function* () {
       decodeClaims,
     );
     const nowMs = yield* Clock.currentTimeMillis;
-    return Option.filter(claims, (decoded) => decoded.expiresAt > nowMs);
+    if (Option.isNone(claims) || claims.value.expiresAt <= nowMs) return Option.none();
+    const firstUse = yield* Ref.modify(consumedSignatures, (consumed) => {
+      const live = new Map([...consumed].filter(([, expiresAt]) => expiresAt > nowMs));
+      if (live.has(signature)) return [false, live];
+      live.set(signature, claims.value.expiresAt);
+      return [true, live];
+    });
+    return firstUse ? claims : Option.none();
   });
 
   const transcribe = Effect.fn("VoiceTranscription.transcribe")(function* (
