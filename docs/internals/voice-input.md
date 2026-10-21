@@ -21,8 +21,9 @@ Mac gets the same provider the desktop app gets. The server spawns
 which probes the helper in the background at startup, retries a probe that times
 out, and advertises `capabilities.appleOnDeviceTranscription` only on macOS 26 or
 later once a probe has found a working helper. The descriptor never waits for the
-probe, so a client that connects before it answers sees the capability as absent
-until it reads the config again. That capability is the client's signal to offer
+probe, and a client can subscribe before it answers, as the desktop app does at
+launch. An answer that changes the capability therefore re-sends the server config
+snapshot to every subscriber. That capability is the client's signal to offer
 the provider. The server also refuses to mint an upload URL for it when the
 capability is absent, so a client that skips the check, or settings copied to a
 Linux host, fail with a clear message instead of a missing binary. Only the

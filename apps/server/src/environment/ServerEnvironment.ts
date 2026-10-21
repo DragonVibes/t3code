@@ -12,6 +12,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -46,6 +47,8 @@ export class ServerEnvironment extends Context.Service<
   {
     readonly getEnvironmentId: Effect.Effect<EnvironmentId>;
     readonly getDescriptor: Effect.Effect<ExecutionEnvironmentDescriptor>;
+    /** The descriptor now, then again each time the Apple speech probe changes it. */
+    readonly streamDescriptorChanges: Stream.Stream<ExecutionEnvironmentDescriptor>;
   }
 >()("t3/environment/ServerEnvironment") {}
 
@@ -274,17 +277,22 @@ export const make = Effect.gen(function* () {
   // The publish opt-in and relay link change at runtime (`t3 connect
   // publish`, the client settings toggle), so the capability is read per
   // descriptor request rather than baked in at startup.
-  const runtimeCapabilities = Effect.all({
+  const getDescriptor = Effect.all({
     agentActivityPublishing: readAgentActivityPublishingActive(secrets),
     appleOnDeviceTranscription: appleSpeech.available,
-  });
-
-  return ServerEnvironment.of({
-    getEnvironmentId: Effect.succeed(environmentId),
-    getDescriptor: Effect.map(runtimeCapabilities, (capabilities) => ({
+  }).pipe(
+    Effect.map((capabilities) => ({
       ...descriptor,
       capabilities: { ...descriptor.capabilities, ...capabilities },
     })),
+  );
+
+  return ServerEnvironment.of({
+    getEnvironmentId: Effect.succeed(environmentId),
+    getDescriptor,
+    streamDescriptorChanges: appleSpeech.streamAvailableChanges.pipe(
+      Stream.mapEffect(() => getDescriptor),
+    ),
   });
 });
 

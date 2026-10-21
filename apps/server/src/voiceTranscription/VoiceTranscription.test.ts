@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import {
   HttpClient,
@@ -39,6 +40,7 @@ const appleSpeechWith = (
 ) =>
   AppleSpeechHelper.AppleSpeechHelper.of({
     available: Effect.succeed(availability === "available"),
+    streamAvailableChanges: Stream.make(availability === "available"),
     availability: Effect.succeed(availability),
     transcribe,
   });

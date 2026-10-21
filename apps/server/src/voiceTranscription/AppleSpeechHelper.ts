@@ -7,9 +7,10 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as NodeOS from "node:os";
 
 import * as ServerConfig from "../config.ts";
@@ -97,6 +98,8 @@ export class AppleSpeechHelper extends Context.Service<
   {
     /** The latest probe answer without waiting, false until one arrives; descriptor reads use it. */
     readonly available: Effect.Effect<boolean>;
+    /** `available` now, then each time a probe answer changes it. */
+    readonly streamAvailableChanges: Stream.Stream<boolean>;
     /** Waits for the first probe to answer. */
     readonly availability: Effect.Effect<AppleSpeechAvailability>;
     readonly transcribe: (input: {
@@ -172,13 +175,13 @@ export const make = Effect.gen(function* () {
   });
 
   const hostSupported = hostSupportsSpeechAnalyzer(platform, kernelRelease);
-  const helperPath = yield* Ref.make(Option.none<string>());
+  const helperPath = yield* SubscriptionRef.make(Option.none<string>());
   const firstProbeAnswered = yield* Deferred.make<void>();
   const locateOnce = yield* Effect.cached(locate);
 
   const probeInBackground = locateOnce.pipe(
     Effect.flatMap(Option.match({ onNone: () => Effect.succeedNone, onSome: probe })),
-    Effect.flatMap((found) => Ref.set(helperPath, found)),
+    Effect.flatMap((found) => SubscriptionRef.set(helperPath, found)),
     Effect.ensuring(Deferred.succeed(firstProbeAnswered, undefined)),
     Effect.retry({ schedule: Schedule.spaced(PROBE_RETRY_DELAY), times: PROBE_RETRY_LIMIT }),
     Effect.ignore({ log: true }),
@@ -190,7 +193,7 @@ export const make = Effect.gen(function* () {
   }
 
   const answeredHelperPath = Deferred.await(firstProbeAnswered).pipe(
-    Effect.andThen(Ref.get(helperPath)),
+    Effect.andThen(SubscriptionRef.get(helperPath)),
   );
   const availability: Effect.Effect<AppleSpeechAvailability> = hostSupported
     ? Effect.map(answeredHelperPath, (found) =>
@@ -252,7 +255,11 @@ export const make = Effect.gen(function* () {
   }, Effect.scoped);
 
   return AppleSpeechHelper.of({
-    available: Effect.map(Ref.get(helperPath), Option.isSome),
+    available: Effect.map(SubscriptionRef.get(helperPath), Option.isSome),
+    streamAvailableChanges: SubscriptionRef.changes(helperPath).pipe(
+      Stream.map(Option.isSome),
+      Stream.changes,
+    ),
     availability,
     transcribe,
   });
@@ -264,6 +271,7 @@ export const layerUnavailable = Layer.succeed(
   AppleSpeechHelper,
   AppleSpeechHelper.of({
     available: Effect.succeed(false),
+    streamAvailableChanges: Stream.make(false),
     availability: Effect.succeed("unavailable"),
     transcribe: () => new AppleSpeechHelperError({ reason: "unavailable" }),
   }),

@@ -6,6 +6,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -251,6 +252,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
                   AppleSpeechHelper.AppleSpeechHelper,
                   AppleSpeechHelper.AppleSpeechHelper.of({
                     available: Effect.succeed(available),
+                    streamAvailableChanges: Stream.make(available),
                     availability: Effect.die("the descriptor must not wait for a probe"),
                     transcribe: () => Effect.die("unused"),
                   }),

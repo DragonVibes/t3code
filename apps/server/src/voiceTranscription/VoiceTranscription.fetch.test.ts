@@ -6,6 +6,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import { FetchHttpClient } from "effect/http";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -82,6 +83,7 @@ const transcribeAgainst = (answer: Upstream) =>
           AppleSpeechHelper.AppleSpeechHelper,
           AppleSpeechHelper.AppleSpeechHelper.of({
             available: Effect.succeed(false),
+            streamAvailableChanges: Stream.make(false),
             availability: Effect.succeed("unsupported-host"),
             transcribe: () => Effect.die("unused"),
           }),

@@ -300,10 +300,13 @@ const resolveEditorConfig = Effect.fn("ws.resolveEditorConfig")(function* <E, R>
   };
 });
 
-export const withLateEditorConfig = <E, R>(
+// Late config goes out as a whole snapshot, not a new event type, because shipped
+// clients decode this stream against their own event union.
+export const withLateConfig = <E, R>(
   config: ClientServerConfig,
   liveUpdates: Stream.Stream<ServerConfigStreamEvent, E, R>,
   launcher: EditorDiscovery,
+  environmentChanges: Stream.Stream<ClientServerConfig["environment"]>,
 ) => {
   const lateEditorConfig = Stream.fromEffect(launcher.resolveAvailableEditors()).pipe(
     Stream.filter(
@@ -323,8 +326,11 @@ export const withLateEditorConfig = <E, R>(
     ),
     Stream.map((editorConfig) => ({ type: "editorsResolved" as const, editorConfig })),
   );
+  const environmentUpdates = environmentChanges.pipe(
+    Stream.map((environment) => ({ type: "environmentChanged" as const, environment })),
+  );
 
-  return Stream.merge(liveUpdates, lateEditorConfig).pipe(
+  return Stream.merge(liveUpdates, Stream.merge(lateEditorConfig, environmentUpdates)).pipe(
     Stream.mapAccum(
       (): ClientServerConfig => config,
       (current, event): readonly [ClientServerConfig, ReadonlyArray<ServerConfigStreamEvent>] => {
@@ -337,6 +343,13 @@ export const withLateEditorConfig = <E, R>(
               ...rest
             } = current;
             const next = { ...rest, ...event.editorConfig };
+            return [next, [{ version: 1, type: "snapshot", config: next }]];
+          }
+          case "environmentChanged": {
+            if (JSON.stringify(event.environment) === JSON.stringify(current.environment)) {
+              return [current, []];
+            }
+            const next = { ...current, environment: event.environment };
             return [next, [{ version: 1, type: "snapshot", config: next }]];
           }
           case "keybindingsUpdated":
@@ -3055,7 +3068,12 @@ export const layerWsRpc = (
 
               return Stream.concat(
                 rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
-                withLateEditorConfig(config, liveUpdates, externalLauncher),
+                withLateConfig(
+                  config,
+                  liveUpdates,
+                  externalLauncher,
+                  serverEnvironment.streamDescriptorChanges,
+                ),
               );
             }),
           ),
