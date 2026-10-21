@@ -1,3 +1,4 @@
+import { VoiceTranscriptionNotConfiguredError } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -151,6 +152,15 @@ describe("createEnvironmentVoiceTranscriber", () => {
     );
     expect(unconfigured).toMatchObject({ code: "unavailable", message: "Add an API key." });
 
+    const internal = await transcriptionError(
+      transcribe(
+        createHarness({
+          post: { status: 500, body: { code: "internal", message: "Server error." } },
+        }),
+      ),
+    );
+    expect(internal).toMatchObject({ code: "transcription-failed", message: "Server error." });
+
     const opaque = await transcriptionError(
       transcribe(createHarness({ post: { status: 500, body: "<html>" } })),
     );
@@ -158,33 +168,37 @@ describe("createEnvironmentVoiceTranscriber", () => {
   });
 
   it("maps a refused URL mint to unavailable with the environment's own reason", async () => {
-    const unconfigured = await transcriptionError(
-      transcribe(
-        createHarness({
-          createTranscriptionUrl: async () => {
-            throw {
-              _tag: "VoiceTranscriptionNotConfiguredError",
-              message: "Add an OpenAI API key to use voice transcription.",
-            };
-          },
-        }),
-      ),
+    const refusedBy = (error: unknown) =>
+      transcriptionError(
+        transcribe(
+          createHarness({
+            createTranscriptionUrl: async () => {
+              throw error;
+            },
+          }),
+        ),
+      );
+
+    const decoded = await refusedBy(
+      new VoiceTranscriptionNotConfiguredError({ reason: "missing-api-key", providerName: "xAI" }),
     );
-    expect(unconfigured).toMatchObject({
+    expect(decoded).toMatchObject({
       code: "unavailable",
-      message: "Add an OpenAI API key to use voice transcription.",
+      message: "Add an xAI API key to use voice transcription.",
     });
 
-    const silent = await transcriptionError(
-      transcribe(
-        createHarness({
-          createTranscriptionUrl: async () => {
-            throw { _tag: "VoiceTranscriptionNotConfiguredError", message: "" };
-          },
-        }),
-      ),
-    );
-    expect(silent).toMatchObject({ code: "unavailable", message: expect.stringContaining("not") });
+    const encoded = await refusedBy({
+      _tag: "VoiceTranscriptionNotConfiguredError",
+      reason: "insecure-base-url",
+      providerName: "OpenAI",
+    });
+    expect(encoded).toMatchObject({
+      code: "unavailable",
+      message: expect.stringContaining("https"),
+    });
+
+    const bare = await refusedBy({ _tag: "VoiceTranscriptionNotConfiguredError" });
+    expect(bare).toMatchObject({ code: "unavailable", message: expect.stringContaining("not") });
 
     const offline = await transcriptionError(
       transcribe(

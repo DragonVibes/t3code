@@ -3,10 +3,12 @@ import {
   VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS,
   VoiceTranscriptionAudioMimeType,
   VoiceTranscriptionFailure,
+  VoiceTranscriptionNotConfiguredError,
   VoiceTranscriptionResult,
-  type HttpVoiceTranscriptionProvider,
   type VoiceTranscriptionCreateUrlInput,
   type VoiceTranscriptionCreateUrlResult,
+  type VoiceTranscriptionNotConfiguredReason,
+  type VoiceTranscriptionProvider,
   type VoiceTranscriptionSettings,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -45,29 +47,31 @@ export type EnvironmentVoiceTranscriberDependencies = {
 const decodeMimeType = Schema.decodeUnknownOption(VoiceTranscriptionAudioMimeType);
 const decodeResult = Schema.decodeUnknownOption(VoiceTranscriptionResult);
 const decodeFailure = Schema.decodeUnknownOption(VoiceTranscriptionFailure);
+const decodeNotConfigured = Schema.decodeUnknownOption(VoiceTranscriptionNotConfiguredError);
 
-const HOSTED_PROVIDER_NAMES: Record<HttpVoiceTranscriptionProvider, string> = {
+/** The server's names, which its not-configured messages quote. */
+const PROVIDER_NAMES: Record<VoiceTranscriptionProvider, string> = {
   "openai-compatible": "OpenAI",
   xai: "xAI",
+  "apple-on-device": "Apple on-device transcription",
 };
 
 /**
- * The checks the server runs before minting an upload URL, so a misconfigured
- * environment fails before the microphone opens. Messages match the server's.
+ * The checks the server runs before minting an upload URL that the client can
+ * repeat from what it already holds, so a misconfigured environment fails before
+ * the microphone opens.
  */
 export function voiceTranscriptionUnavailableReason({
   settings,
   appleOnDeviceTranscription,
-}: VoiceTranscriptionConfiguration): string | null {
-  if (!settings.enabled) return "Voice transcription is turned off for this environment.";
+}: VoiceTranscriptionConfiguration): VoiceTranscriptionNotConfiguredReason | null {
+  if (!settings.enabled) return "disabled";
   if (settings.provider === "apple-on-device") {
-    return appleOnDeviceTranscription
-      ? null
-      : "Apple on-device transcription needs macOS 26 or later on the machine running T3 Code.";
+    return appleOnDeviceTranscription ? null : "apple-unsupported-host";
   }
   const hostedBaseUrl = VOICE_TRANSCRIPTION_PROVIDER_DEFAULTS[settings.provider].baseUrl;
   if (!settings.apiKey && settings.baseUrl.replace(/\/+$/, "") === hostedBaseUrl) {
-    return `Add an ${HOSTED_PROVIDER_NAMES[settings.provider]} API key to use voice transcription.`;
+    return "missing-api-key";
   }
   return null;
 }
@@ -76,17 +80,16 @@ function containerMimeType(blobType: string): VoiceTranscriptionAudioMimeType | 
   return Option.getOrNull(decodeMimeType(blobType.split(";")[0]?.trim().toLowerCase()));
 }
 
+/** `message` is a getter on the class, so the error is decoded before it is read. */
 function notConfiguredMessage(error: unknown): string | null {
-  if (
-    typeof error !== "object" ||
-    error === null ||
-    !("_tag" in error) ||
-    error._tag !== "VoiceTranscriptionNotConfiguredError"
-  ) {
-    return null;
-  }
-  const message = "message" in error && typeof error.message === "string" ? error.message : "";
-  return message.length > 0 ? message : "Voice input is not configured on this environment.";
+  const decoded = Option.getOrNull(decodeNotConfigured(error));
+  if (decoded) return decoded.message;
+  const tagged =
+    typeof error === "object" &&
+    error !== null &&
+    "_tag" in error &&
+    error._tag === "VoiceTranscriptionNotConfiguredError";
+  return tagged ? "Voice input is not configured on this environment." : null;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -242,8 +245,14 @@ export function createEnvironmentVoiceTranscriber(
     prepare: async ({ signal }) => {
       throwIfVoiceTranscriptionAborted(signal);
       const configuration = dependencies.readConfiguration();
-      const unavailable = configuration && voiceTranscriptionUnavailableReason(configuration);
-      if (unavailable) throw new VoiceTranscriptionError("unavailable", unavailable);
+      const reason = configuration && voiceTranscriptionUnavailableReason(configuration);
+      if (reason) {
+        const refusal = new VoiceTranscriptionNotConfiguredError({
+          reason,
+          providerName: PROVIDER_NAMES[configuration.settings.provider],
+        });
+        throw new VoiceTranscriptionError("unavailable", refusal.message, { cause: refusal });
+      }
       const language = dependencies.language().trim();
       return {
         locale: language.length > 0 ? language : dependencies.fallbackLocale(),
