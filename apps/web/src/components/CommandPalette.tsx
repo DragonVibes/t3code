@@ -124,6 +124,7 @@ import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
 import { threadEnvironment } from "../state/threads";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
+import { voiceTranscriptionEnvironment } from "~/state/voiceTranscription";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
@@ -1022,12 +1023,13 @@ function OpenCommandPaletteDialog(props: {
   const currentProjectEnvironmentId =
     activeThread?.environmentId ?? activeDraftThread?.environmentId ?? null;
   const currentProjectId = activeThread?.projectId ?? activeDraftThread?.projectId ?? null;
-  const canOperateCurrentEnvironment = useEnvironmentScope(
-    currentProjectEnvironmentId,
-    AuthOrchestrationOperateScope,
+  const canCreateTranscriptionUrl = useAtomValue(
+    voiceTranscriptionEnvironment.createTranscriptionUrl.permissionAtom(
+      currentProjectEnvironmentId,
+    ),
   );
   const voiceInputAvailable =
-    canOperateCurrentEnvironment &&
+    canCreateTranscriptionUrl &&
     environments.find((environment) => environment.environmentId === currentProjectEnvironmentId)
       ?.serverConfig?.settings.voiceTranscription.enabled === true;
   const composerHandleRef = useComposerHandleContext();

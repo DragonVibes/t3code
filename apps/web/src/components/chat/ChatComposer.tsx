@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import { formatProviderSkillDisplayName } from "@t3tools/shared/inlineSkills";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
@@ -5,6 +6,7 @@ import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { runtimeModeConfig, runtimeModeOptions as runtimeModes } from "./runtimeModeConfig";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { usePrimaryEnvironmentId } from "../../state/environments";
+import { voiceTranscriptionEnvironment } from "~/state/voiceTranscription";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { AttachmentFilePreview } from "../files/AttachmentFilePreview";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
@@ -1066,6 +1068,7 @@ import {
 } from "lucide-react";
 import { proposedPlanTitle } from "@t3tools/shared/proposedPlanText";
 import { hasProviderSetup } from "./ProviderStatusBanner";
+import { voiceInputBannerItem } from "./ComposerVoiceInputBanner";
 import { ComposerVoiceInputControl } from "./ComposerVoiceInputControl";
 import { useComposerVoiceInput } from "./useComposerVoiceInput";
 import {
@@ -2116,6 +2119,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (text: string, selection: { readonly start: number; readonly end: number }) =>
       voiceCommitRef.current?.(text, selection) ?? false,
   );
+  const canCreateTranscriptionUrl = useAtomValue(
+    voiceTranscriptionEnvironment.createTranscriptionUrl.permissionAtom(environmentId),
+  );
   const voiceInput = useComposerVoiceInput({
     environmentId,
     ownerKey: voiceOwnerKey,
@@ -2891,13 +2897,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         activePendingProgress.activeQuestion?.allowCustomAnswer !== false));
   const showComposerVoiceAction =
     settings.voiceTranscription.enabled &&
-    canOperateThread &&
-    !isConnecting &&
+    canCreateTranscriptionUrl &&
+    environmentUnavailable === null &&
     !isComposerApprovalState &&
     !projectSelectionRequired &&
     !isChoiceOnlyPendingQuestion &&
     !activePendingIsResponding;
   const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
+  const composerFooterHasActiveVoiceControl = voiceInput.busy;
 
   const isComposerMenuLoading =
     (composerTriggerKind === "path" && pathTriggerQuery.length > 0 && workspaceEntries.isPending) ||
@@ -3534,11 +3541,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const composerFormWidth = measureComposerFormWidth();
       const footerCompact = shouldUseCompactComposerFooter(composerFormWidth, {
         hasWideActions: composerFooterHasWideActions,
+        hasActiveVoiceControl: composerFooterHasActiveVoiceControl,
       });
       const primaryActionsCompact =
         footerCompact &&
         shouldUseCompactComposerPrimaryActions(composerFormWidth, {
           hasWideActions: composerFooterHasWideActions,
+          hasActiveVoiceControl: composerFooterHasActiveVoiceControl,
         });
       return {
         primaryActionsCompact,
@@ -3560,7 +3569,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         previous === nextCompactness.footerCompact ? previous : nextCompactness.footerCompact,
       );
     });
-  }, [composerFooterHasWideActions]);
+  }, [composerFooterHasWideActions, composerFooterHasActiveVoiceControl]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5394,9 +5403,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         content: activityStackContent,
       }
     : null;
-  const bannerStackItems = activityStackItem
-    ? [activityStackItem, ...props.bannerItems]
-    : props.bannerItems;
+  const voiceBannerItem = voiceInputBannerItem({
+    state: voiceInput.state,
+    onRetry: voiceInput.retry,
+    onDismiss: voiceInput.cancel,
+  });
+  const bannerStackItems = [
+    ...(voiceBannerItem ? [voiceBannerItem] : []),
+    ...(activityStackItem ? [activityStackItem] : []),
+    ...props.bannerItems,
+  ];
   const [tasksDrawerThreadId, setTasksDrawerThreadId] = useState(activeThreadId);
   if (
     isTasksDrawerOpen &&
@@ -7398,6 +7414,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         keybindings,
                         "composer.toggleDictation",
                       )}
+                      announcement={voiceInput.announcement}
                       readStartedAt={voiceInput.readStartedAt}
                       readLevel={voiceInput.readLevel}
                       onToggle={voiceInput.toggle}

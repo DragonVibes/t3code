@@ -1,4 +1,4 @@
-import { AuthOrchestrationOperateScope, WS_METHODS, type EnvironmentId } from "@t3tools/contracts";
+import { WS_METHODS, type EnvironmentId } from "@t3tools/contracts";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import {
   createEnvironmentRpcCommand,
@@ -14,7 +14,7 @@ import { connectionAtomRuntime } from "../connection/runtime";
 import { convertRecordingToWav } from "../lib/voiceWav";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { serverEnvironment } from "./server";
-import { readEnvironmentScope, readPreparedConnection } from "./session";
+import { readPreparedConnection } from "./session";
 
 export const voiceTranscriptionEnvironment = {
   createTranscriptionUrl: createEnvironmentRpcCommand(connectionAtomRuntime, {
@@ -51,7 +51,10 @@ export function createWebVoiceTranscriber(
       return result.value;
     },
     resolveUrl: (relativeUrl) => {
-      if (!readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return null;
+      const permitted = appAtomRegistry.get(
+        voiceTranscriptionEnvironment.createTranscriptionUrl.permissionAtom(environmentId),
+      );
+      if (!permitted) return null;
       const connection = readPreparedConnection(environmentId);
       return connection ? resolveAssetUrl(connection.httpBaseUrl, relativeUrl) : null;
     },

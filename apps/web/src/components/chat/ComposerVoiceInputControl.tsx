@@ -1,28 +1,26 @@
-import type { VoiceInputState } from "@t3tools/client-runtime/voice-input";
-import { CircleAlertIcon, MicIcon, XIcon } from "lucide-react";
+import type { VoiceInputPhase, VoiceInputState } from "@t3tools/client-runtime/voice-input";
+import { MicIcon, XIcon } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useMediaQuery } from "~/hooks/useMediaQuery";
-import { microphonePermissionHost, openMicrophoneSystemSettings } from "~/lib/microphoneSettings";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import {
-  resolveVoiceInputErrorPresentation,
-  type VoiceInputErrorContext,
-} from "./voiceInputErrorPresentation";
 
 const VOICE_METER_INTERVAL_MS = 66;
 const VOICE_METER_BAR_COUNT = 5;
 const VOICE_METER_REST_SCALE = 0.15;
 
-const BROWSER_ERROR_CONTEXT: VoiceInputErrorContext = {
-  secureContext: typeof window !== "undefined" && window.isSecureContext,
-  permissionHost: microphonePermissionHost,
+const TOGGLE_LABELS: Record<VoiceInputPhase, string> = {
+  idle: "Voice input",
+  error: "Voice input",
+  preparing: "Starting voice input",
+  recording: "Stop and transcribe",
+  transcribing: "Transcribing",
 };
 
-export function formatVoiceElapsed(seconds: number): string {
+function formatVoiceElapsed(seconds: number): string {
   const whole = Math.max(0, Math.floor(seconds));
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
@@ -97,36 +95,33 @@ function VoiceElapsed({
 export interface ComposerVoiceInputControlProps {
   readonly state: VoiceInputState;
   readonly shortcutLabel: string | null;
+  /** Read by the visually hidden status region; errors are announced by their banner. */
+  readonly announcement: string;
   readonly readStartedAt: () => number | null;
   readonly readLevel: () => number;
   readonly onToggle: () => void;
   readonly onCancel: () => void;
-  readonly errorContext?: VoiceInputErrorContext;
-  readonly onOpenSettings?: () => void;
 }
 
 export const ComposerVoiceInputControl = memo(function ComposerVoiceInputControl(
   props: ComposerVoiceInputControlProps,
 ) {
-  const { state, shortcutLabel, readStartedAt, readLevel, onToggle, onCancel } = props;
-  const errorContext = props.errorContext ?? BROWSER_ERROR_CONTEXT;
-  const onOpenSettings = props.onOpenSettings ?? openMicrophoneSystemSettings;
+  const { state, shortcutLabel, announcement, readStartedAt, readLevel, onToggle, onCancel } =
+    props;
   const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
   const phase = state.phase;
   const active = phase === "preparing" || phase === "recording" || phase === "transcribing";
-  const error = resolveVoiceInputErrorPresentation(state, errorContext);
-  const shortcutSuffix = shortcutLabel ? ` (${shortcutLabel})` : "";
-  const toggleLabel =
-    phase === "recording"
-      ? "Stop and transcribe"
-      : phase === "transcribing"
-        ? "Transcribing"
-        : phase === "preparing"
-          ? "Starting voice input"
-          : "Voice input";
+  // aria-disabled rather than disabled, so keyboard focus survives the transition.
+  const toggleInert = phase === "preparing" || phase === "transcribing";
+  const toggleLabel = TOGGLE_LABELS[phase];
+  const toggleTooltip =
+    shortcutLabel && !toggleInert ? `${toggleLabel} (${shortcutLabel})` : toggleLabel;
 
   return (
     <div className="flex min-w-0 items-center gap-1" data-voice-input-phase={phase}>
+      <span role="status" className="sr-only">
+        {announcement}
+      </span>
       {active ? (
         <>
           <Tooltip>
@@ -144,7 +139,7 @@ export const ComposerVoiceInputControl = memo(function ComposerVoiceInputControl
             >
               <XIcon />
             </TooltipTrigger>
-            <TooltipPopup>Cancel voice input (Esc)</TooltipPopup>
+            <TooltipPopup>Cancel voice input</TooltipPopup>
           </Tooltip>
           <div className="flex h-7 w-8 items-center justify-center">
             {phase === "transcribing" ? (
@@ -157,50 +152,6 @@ export const ComposerVoiceInputControl = memo(function ComposerVoiceInputControl
           </div>
           <VoiceElapsed readStartedAt={readStartedAt} running={phase === "recording"} />
         </>
-      ) : error ? (
-        <div className="flex min-w-0 items-center gap-1 text-xs text-destructive">
-          <Tooltip>
-            <TooltipTrigger
-              render={<span className="flex min-w-0 items-center gap-1" role="alert" />}
-            >
-              <CircleAlertIcon className="size-3.5 shrink-0" />
-              <span className="max-w-56 truncate">{error.message}</span>
-            </TooltipTrigger>
-            <TooltipPopup>{error.message}</TooltipPopup>
-          </Tooltip>
-          {error.action === "open-settings" ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              onClick={() => {
-                void onOpenSettings();
-              }}
-            >
-              Open settings
-            </Button>
-          ) : error.action === "retry" ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="xs"
-              onPointerDown={keepEditorSelection}
-              onClick={onToggle}
-            >
-              Retry
-            </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Dismiss voice input error"
-            onPointerDown={keepEditorSelection}
-            onClick={onCancel}
-          >
-            <XIcon />
-          </Button>
-        </div>
       ) : null}
       <Tooltip>
         <TooltipTrigger
@@ -210,16 +161,17 @@ export const ComposerVoiceInputControl = memo(function ComposerVoiceInputControl
               variant="ghost"
               size="icon-sm"
               aria-label={toggleLabel}
-              aria-pressed={phase === "recording"}
-              disabled={phase === "preparing" || phase === "transcribing"}
+              aria-disabled={toggleInert || undefined}
               onPointerDown={keepEditorSelection}
-              onClick={onToggle}
+              onClick={() => {
+                if (!toggleInert) onToggle();
+              }}
             />
           }
         >
           <MicIcon className={cn(phase === "recording" && "text-destructive")} />
         </TooltipTrigger>
-        <TooltipPopup>{`${toggleLabel}${shortcutSuffix}`}</TooltipPopup>
+        <TooltipPopup>{toggleTooltip}</TooltipPopup>
       </Tooltip>
     </div>
   );

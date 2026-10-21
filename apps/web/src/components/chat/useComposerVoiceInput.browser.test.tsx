@@ -62,6 +62,7 @@ class FakeMediaRecorder implements MediaRecorderLike {
 const prepared: PreparedVoiceTranscription = { locale: "en-US", transcribe: async () => "spoken" };
 
 function setup(prepare: VoiceTranscriber["prepare"] = async () => prepared) {
+  commits = [];
   const tracks = [{ stop: vi.fn() }];
   const stream = { getTracks: () => tracks } as unknown as MediaStream;
   const pendingStarts: Array<() => void> = [];
@@ -94,6 +95,7 @@ function setup(prepare: VoiceTranscriber["prepare"] = async () => prepared) {
 }
 
 let voice!: ComposerVoiceInput;
+let commits: Array<{ text: string; selection: { start: number; end: number } }> = [];
 function Host({ ownerKey }: { ownerKey: string }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const next = useComposerVoiceInput({
@@ -103,7 +105,10 @@ function Host({ ownerKey }: { ownerKey: string }) {
     draftText: "hello",
     composerRef: rootRef,
     readDraft: () => ({ ownerKey, text: "hello", selection: { start: 5, end: 5 } }),
-    commitDraft: () => true,
+    commitDraft: (text, selection) => {
+      commits.push({ text, selection });
+      return true;
+    },
   });
   useEffect(() => {
     voice = next;
@@ -173,6 +178,19 @@ describe("useComposerVoiceInput", () => {
     await startRecording();
     await screen.unmount();
     expect(tracks[0]!.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it("inserts the transcript at the captured selection and announces each step", async () => {
+    const { startRecording } = setup();
+    await using _screen = await render(<Page />);
+    expect(voice.announcement).toBe("");
+    await startRecording();
+    expect(voice.announcement).toBe("Recording.");
+
+    await act(async () => voice.toggle());
+    expect(voice.state.phase).toBe("idle");
+    expect(commits).toEqual([{ text: "hello spoken", selection: { start: 12, end: 12 } }]);
+    expect(voice.announcement).toBe("Transcript inserted.");
   });
 
   it("ignores toggle while voice input is still starting", async () => {
