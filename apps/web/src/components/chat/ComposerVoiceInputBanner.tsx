@@ -53,6 +53,7 @@ export function voiceInputBannerItem(input: {
         type="button"
         size="xs"
         variant="ghost"
+        onPointerDown={keepEditorSelection}
         onClick={() => void openSettingsOrExplain(openSettings)}
       >
         Open settings

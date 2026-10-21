@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 import { act, render } from "../../../test/render";
@@ -35,6 +36,33 @@ describe("voiceInputBannerItem", () => {
     expect(add).toHaveBeenCalledWith(
       expect.objectContaining({ type: "error", description: "Unable to open System Settings." }),
     );
+  });
+
+  it.each([
+    ["Open settings", denied, "macos"],
+    [
+      "Retry",
+      { phase: "error", error: "Upload failed.", errorAction: "retry-transcription" },
+      "browser",
+    ],
+  ] as const)("leaves focus in the composer when %s is pressed", async (name, state, host) => {
+    const item = voiceInputBannerItem({
+      state,
+      errorContext: { secureContext: true, permissionHost: host },
+      openSettings: async () => {},
+      onRetry: () => {},
+      onDismiss: () => {},
+    });
+    await using screen = await render(
+      <>
+        <textarea aria-label="Composer" />
+        <ComposerBannerStack items={item ? [item] : []} />
+      </>,
+    );
+    const composer = screen.getByRole("textbox", { name: "Composer" }).element();
+    (composer as HTMLTextAreaElement).focus();
+    await userEvent.click(screen.getByRole("button", { name }));
+    expect(document.activeElement).toBe(composer);
   });
 
   it("offers Retry for a kept recording and nothing while voice input runs", async () => {
