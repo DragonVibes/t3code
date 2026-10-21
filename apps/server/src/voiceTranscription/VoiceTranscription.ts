@@ -11,6 +11,7 @@ import {
   type VoiceTranscriptionResult,
   type VoiceTranscriptionSettings,
 } from "@t3tools/contracts";
+import { isPrivateNetworkHost } from "@t3tools/shared/hostClassification";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -275,6 +276,9 @@ const make = Effect.gen(function* () {
     const url = URL.parse(`${baseUrl}/${backend.path}`);
     if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) {
       return yield* notConfigured("invalid-base-url");
+    }
+    if (url.protocol === "http:" && settings.apiKey && !isPrivateNetworkHost(url.hostname)) {
+      return yield* notConfigured("insecure-base-url");
     }
     return {
       ...backend,

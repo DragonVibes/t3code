@@ -208,6 +208,7 @@ describe("VoiceTranscription", () => {
     { settings: { model: "" }, message: "model name" },
     { settings: { baseUrl: "" }, message: "endpoint URL" },
     { settings: { baseUrl: "ftp://whisper.local" }, message: "not valid" },
+    { settings: { baseUrl: "http://api.example.com/v1" }, message: "only over https" },
   ] as const)("refuses to mint an upload URL when $message", (expected) => {
     const { settings, message } = expected;
     const { layer } = setup(
@@ -248,6 +249,27 @@ describe("VoiceTranscription", () => {
       expect(file.name).toBe("audio.webm");
       expect(file.type).toBe("audio/webm");
       expect(new Uint8Array(yield* Effect.promise(() => file.arrayBuffer()))).toEqual(audio);
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect.each([
+    { baseUrl: "http://localhost:8080/v1", apiKey: "sk-test" },
+    { baseUrl: "http://127.0.0.2:8080/v1", apiKey: "sk-test" },
+    { baseUrl: "http://[::1]:8080/v1", apiKey: "sk-test" },
+    { baseUrl: "http://192.168.1.20/v1", apiKey: "sk-test" },
+    { baseUrl: "http://10.0.0.5/v1", apiKey: "sk-test" },
+    { baseUrl: "http://172.20.0.5/v1", apiKey: "sk-test" },
+    { baseUrl: "http://169.254.10.1/v1", apiKey: "sk-test" },
+    { baseUrl: "http://[fd12::5]/v1", apiKey: "sk-test" },
+    { baseUrl: "http://gpu-box.local/v1", apiKey: "sk-test" },
+    { baseUrl: "http://api.example.com/v1", apiKey: "" },
+  ])("allows http to a private endpoint, or anywhere without a key: $baseUrl", (settings) => {
+    const { layer, requests } = setup({ ...settings, model: "whisper-1" });
+    return Effect.gen(function* () {
+      expect((yield* post((yield* mint).relativeUrl)).status).toBe(200);
+      expect(requests[0]!.headers.authorization).toBe(
+        settings.apiKey ? `Bearer ${settings.apiKey}` : undefined,
+      );
     }).pipe(Effect.provide(layer));
   });
 
