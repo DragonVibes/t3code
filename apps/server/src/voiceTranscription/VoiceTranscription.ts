@@ -244,7 +244,7 @@ type TranscriptionEndpoint =
 
 const resolveEndpoint = Effect.fn("VoiceTranscription.resolveEndpoint")(function* (
   settings: VoiceTranscriptionSettings,
-  appleSpeechAvailable: Effect.Effect<boolean>,
+  appleSpeechAvailability: Effect.Effect<AppleSpeechHelper.AppleSpeechAvailability>,
 ): Effect.fn.Return<TranscriptionEndpoint, VoiceTranscriptionNotConfiguredError> {
   const notConfigured = (message: string) => new VoiceTranscriptionNotConfiguredError({ message });
   if (!settings.enabled) {
@@ -252,7 +252,7 @@ const resolveEndpoint = Effect.fn("VoiceTranscription.resolveEndpoint")(function
   }
   const backend = PROVIDER_BACKENDS[settings.provider];
   if (backend.kind === "apple") {
-    if (!(yield* appleSpeechAvailable)) {
+    if ((yield* appleSpeechAvailability) !== "available") {
       return yield* notConfigured(
         "Apple on-device transcription needs macOS 26 or later on the machine running T3 Code.",
       );
@@ -318,7 +318,7 @@ const make = Effect.gen(function* () {
         }),
     ),
     Effect.flatMap((settings) =>
-      resolveEndpoint(settings.voiceTranscription, appleSpeech.available),
+      resolveEndpoint(settings.voiceTranscription, appleSpeech.availability),
     ),
   );
 

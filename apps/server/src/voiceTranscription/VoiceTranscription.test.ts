@@ -29,14 +29,22 @@ import * as VoiceTranscription from "./VoiceTranscription.ts";
 
 const audio = new Uint8Array([1, 2, 3, 4, 5, 6]);
 
-const appleSpeechUnavailable = AppleSpeechHelper.AppleSpeechHelper.of({
-  available: Effect.succeed(false),
-  transcribe: () => Effect.die("the Apple speech helper is unavailable"),
-});
+const appleSpeechWith = (
+  availability: AppleSpeechHelper.AppleSpeechAvailability,
+  transcribe: AppleSpeechHelper.AppleSpeechHelper["Service"]["transcribe"] = () =>
+    Effect.die("the Apple speech helper is unavailable"),
+) =>
+  AppleSpeechHelper.AppleSpeechHelper.of({
+    available: Effect.succeed(availability === "available"),
+    availability: Effect.succeed(availability),
+    transcribe,
+  });
+
+const appleSpeechUnavailable = appleSpeechWith("unsupported-host");
 
 const appleSpeechAvailable = (
   transcribe: AppleSpeechHelper.AppleSpeechHelper["Service"]["transcribe"],
-) => AppleSpeechHelper.AppleSpeechHelper.of({ available: Effect.succeed(true), transcribe });
+) => appleSpeechWith("available", transcribe);
 
 function setup(
   settings: Partial<VoiceTranscriptionSettings>,

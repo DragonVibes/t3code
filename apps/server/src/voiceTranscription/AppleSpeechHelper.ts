@@ -1,12 +1,14 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as NodeOS from "node:os";
 
@@ -18,6 +20,7 @@ const HELPER_NAME = "t3-apple-speech";
 const MIN_DARWIN_MAJOR = 25;
 const PROBE_TIMEOUT = "10 seconds";
 const PROBE_RETRY_DELAY = Duration.minutes(1);
+const PROBE_RETRY_LIMIT = 5;
 // The first transcription in a language downloads its model through AssetInventory.
 const TRANSCRIBE_TIMEOUT_SECONDS = 120;
 const CAUSE_MAX_LENGTH = 300;
@@ -86,11 +89,16 @@ class AppleSpeechProbeTimedOut extends Schema.TaggedError<AppleSpeechProbeTimedO
   }
 }
 
+/** `unsupported-host` is anything older than macOS 26, where the helper is never spawned. */
+export type AppleSpeechAvailability = "available" | "unavailable" | "unsupported-host";
+
 export class AppleSpeechHelper extends Context.Service<
   AppleSpeechHelper,
   {
-    /** Probed once per process and cached. Never spawns off macOS 26 or later. */
+    /** The latest probe answer without waiting, false until one arrives; descriptor reads use it. */
     readonly available: Effect.Effect<boolean>;
+    /** Waits for the first probe to answer. */
+    readonly availability: Effect.Effect<AppleSpeechAvailability>;
     readonly transcribe: (input: {
       readonly audio: Uint8Array;
       readonly locale: string;
@@ -111,6 +119,10 @@ export const AppleSpeechHostKernelRelease = Context.Reference<string>(
 const hostSupportsSpeechAnalyzer = (platform: NodeJS.Platform, kernelRelease: string) =>
   platform === "darwin" && Number.parseInt(kernelRelease, 10) >= MIN_DARWIN_MAJOR;
 
+/** The helper's stdout may hold the user's words, so a cause built from it records only its size. */
+const sizeOnlyCause = (stdout: string) =>
+  new Error(`The helper printed ${stdout.length} bytes, not a transcript.`);
+
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -123,8 +135,6 @@ export const make = Effect.gen(function* () {
   const candidates = [
     environment.T3CODE_APPLE_SPEECH_PATH,
     config.appleSpeechHelperPath,
-    path.resolve(import.meta.dirname, "apple-speech", HELPER_NAME),
-    path.resolve(import.meta.dirname, "../apple-speech", HELPER_NAME),
     path.resolve(import.meta.dirname, "../../../../native/apple-speech/build", HELPER_NAME),
     path.resolve(import.meta.dirname, "../../../native/apple-speech/build", HELPER_NAME),
   ].filter((candidate): candidate is string => Boolean(candidate));
@@ -161,26 +171,38 @@ export const make = Effect.gen(function* () {
     return available ? Option.some(helperPath) : Option.none<string>();
   });
 
-  let helper: Effect.Effect<Option.Option<string>, AppleSpeechProbeTimedOut> = Effect.succeedNone;
-  if (hostSupportsSpeechAnalyzer(platform, kernelRelease)) {
-    helper = yield* Effect.cachedWithTTL(
-      locate.pipe(
-        Effect.flatMap(Option.match({ onNone: () => Effect.succeedNone, onSome: probe })),
-      ),
-      // A probe that hangs during a slow boot must not disable Apple transcription until restart.
-      (exit) => (Exit.isSuccess(exit) ? Duration.infinity : PROBE_RETRY_DELAY),
-    );
-    // The startup sequence reads the environment descriptor, so the spawn
-    // starts now and overlaps the rest of startup instead of delaying it.
-    yield* Effect.forkScoped(Effect.ignore(helper));
+  const hostSupported = hostSupportsSpeechAnalyzer(platform, kernelRelease);
+  const helperPath = yield* Ref.make(Option.none<string>());
+  const firstProbeAnswered = yield* Deferred.make<void>();
+  const locateOnce = yield* Effect.cached(locate);
+
+  const probeInBackground = locateOnce.pipe(
+    Effect.flatMap(Option.match({ onNone: () => Effect.succeedNone, onSome: probe })),
+    Effect.flatMap((found) => Ref.set(helperPath, found)),
+    Effect.ensuring(Deferred.succeed(firstProbeAnswered, undefined)),
+    Effect.retry({ schedule: Schedule.spaced(PROBE_RETRY_DELAY), times: PROBE_RETRY_LIMIT }),
+    Effect.ignore({ log: true }),
+  );
+  if (hostSupported) {
+    yield* Effect.forkScoped(probeInBackground);
+  } else {
+    yield* Deferred.succeed(firstProbeAnswered, undefined);
   }
-  const helperPath = helper.pipe(Effect.orElseSucceed(() => Option.none<string>()));
+
+  const answeredHelperPath = Deferred.await(firstProbeAnswered).pipe(
+    Effect.andThen(Ref.get(helperPath)),
+  );
+  const availability: Effect.Effect<AppleSpeechAvailability> = hostSupported
+    ? Effect.map(answeredHelperPath, (found) =>
+        Option.isSome(found) ? "available" : "unavailable",
+      )
+    : Effect.succeed("unsupported-host");
 
   const transcribe = Effect.fn("AppleSpeechHelper.transcribe")(function* (input: {
     readonly audio: Uint8Array;
     readonly locale: string;
   }) {
-    const command = yield* helperPath;
+    const command = yield* answeredHelperPath;
     if (Option.isNone(command)) {
       return yield* new AppleSpeechHelperError({ reason: "unavailable" });
     }
@@ -223,18 +245,15 @@ export const make = Effect.gen(function* () {
           });
     }
     return yield* Option.match(decodeTranscript(result.stdout), {
-      // The output may hold the user's words, so the cause records only its size.
       onNone: () =>
-        new AppleSpeechHelperError({
-          reason: "failed",
-          cause: new Error(`The helper printed ${result.stdout.length} bytes, not a transcript.`),
-        }),
+        new AppleSpeechHelperError({ reason: "failed", cause: sizeOnlyCause(result.stdout) }),
       onSome: Effect.succeed,
     });
   }, Effect.scoped);
 
   return AppleSpeechHelper.of({
-    available: Effect.map(helperPath, Option.isSome),
+    available: Effect.map(Ref.get(helperPath), Option.isSome),
+    availability,
     transcribe,
   });
 });
@@ -245,6 +264,7 @@ export const layerUnavailable = Layer.succeed(
   AppleSpeechHelper,
   AppleSpeechHelper.of({
     available: Effect.succeed(false),
+    availability: Effect.succeed("unavailable"),
     transcribe: () => new AppleSpeechHelperError({ reason: "unavailable" }),
   }),
 );

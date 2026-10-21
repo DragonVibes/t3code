@@ -231,6 +231,39 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
     }),
   );
 
+  it.effect.each([true, false])(
+    "advertises Apple on-device transcription as %s from the helper's latest answer",
+    (available) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-server-environment-apple-speech-test-",
+        });
+        const descriptor = yield* Effect.gen(function* () {
+          const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+          return yield* serverEnvironment.getDescriptor;
+        }).pipe(
+          Effect.provide(
+            ServerEnvironment.layer.pipe(
+              Layer.provide(ServerSecretStore.layer),
+              Layer.provide(
+                Layer.succeed(
+                  AppleSpeechHelper.AppleSpeechHelper,
+                  AppleSpeechHelper.AppleSpeechHelper.of({
+                    available: Effect.succeed(available),
+                    availability: Effect.die("the descriptor must not wait for a probe"),
+                    transcribe: () => Effect.die("unused"),
+                  }),
+                ),
+              ),
+              Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+            ),
+          ),
+        );
+        expect(descriptor.capabilities.appleOnDeviceTranscription).toBe(available);
+      }),
+  );
+
   it.effect("reports agent activity publishing from the current secret state", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
