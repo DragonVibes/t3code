@@ -427,14 +427,21 @@ const make = Effect.gen(function* () {
       fields: Omit<ConstructorParameters<typeof VoiceTranscriptionUpstreamError>[0], "host">,
     ) => new VoiceTranscriptionUpstreamError({ host: endpoint.host, ...fields });
 
+    // Sent as bytes, not FormData. On a 401, Node 24's bundled undici re-encodes a FormData body
+    // in a detached task, which throws and exits the process when the fetch is then aborted.
+    const encodedForm = new Response(
+      endpoint.form({
+        model: endpoint.model,
+        language: endpoint.language,
+        file: new Blob([audio], { type: claims.mimeType }),
+        fileName: `audio.${AUDIO_FILE_EXTENSIONS[claims.mimeType]}`,
+      }),
+    );
+    const formBytes = new Uint8Array(yield* Effect.promise(() => encodedForm.arrayBuffer()));
     const request = HttpClientRequest.post(endpoint.url).pipe(
-      HttpClientRequest.bodyFormData(
-        endpoint.form({
-          model: endpoint.model,
-          language: endpoint.language,
-          file: new Blob([audio], { type: claims.mimeType }),
-          fileName: `audio.${AUDIO_FILE_EXTENSIONS[claims.mimeType]}`,
-        }),
+      HttpClientRequest.bodyUint8Array(
+        formBytes,
+        encodedForm.headers.get("content-type") ?? undefined,
       ),
       endpoint.apiKey ? HttpClientRequest.bearerToken(endpoint.apiKey) : identity,
       HttpClientRequest.acceptJson,

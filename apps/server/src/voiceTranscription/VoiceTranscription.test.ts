@@ -129,9 +129,10 @@ const post = (
   }).pipe(Effect.scoped);
 
 const formOf = (request: HttpClientRequest.HttpClientRequest) => {
-  if (request.body._tag !== "FormData")
-    throw new Error(`expected FormData, got ${request.body._tag}`);
-  return request.body.formData;
+  const { body } = request;
+  if (body._tag !== "Uint8Array") throw new Error(`expected bytes, got ${body._tag}`);
+  const headers = { "content-type": request.headers["content-type"] ?? "" };
+  return Effect.promise(() => new Response(body.body, { headers }).formData());
 };
 
 describe("VoiceTranscription", () => {
@@ -242,7 +243,7 @@ describe("VoiceTranscription", () => {
       const request = requests[0]!;
       expect(request.url).toBe("http://whisper.local:8080/v1/audio/transcriptions");
       expect(request.headers.authorization).toBeUndefined();
-      const form = formOf(request);
+      const form = yield* formOf(request);
       expect(form.get("model")).toBe("whisper-1");
       expect(form.get("response_format")).toBe("json");
       expect(form.getAll("language")).toEqual(["en"]);
@@ -287,7 +288,7 @@ describe("VoiceTranscription", () => {
         const request = requests[0]!;
         expect(request.url).toBe("https://api.openai.com/v1/audio/transcriptions");
         expect(request.headers.authorization).toBe("Bearer sk-test");
-        const form = formOf(request);
+        const form = yield* formOf(request);
         expect(form.get("model")).toBe("gpt-transcribe");
         expect(form.getAll("languages[]")).toEqual(languages);
         expect(form.has("language")).toBe(false);
@@ -315,7 +316,7 @@ describe("VoiceTranscription", () => {
         expect(request.method).toBe("POST");
         expect(request.url).toBe("https://api.x.ai/v1/stt");
         expect(request.headers.authorization).toBe("Bearer sk-test");
-        const form = formOf(request);
+        const form = yield* formOf(request);
         expect([...form.keys()]).toEqual(fields);
         expect(form.get("model")).toBe("grok-voice-transcribe-2.0");
         expect(form.getAll("language")).toEqual(language ? [language] : []);
