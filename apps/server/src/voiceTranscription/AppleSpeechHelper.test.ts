@@ -4,6 +4,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as NodeFS from "node:fs";
@@ -236,6 +237,29 @@ describe("AppleSpeechHelper", () => {
       expect(run.command).toBe(helperPath);
       expect(run.args).toEqual(["transcribe", "--locale", "en", wavPath]);
       expect(yield* fileSystem.exists(wavPath)).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("gives up on a helper that never answers with a timeout error", () =>
+    Effect.gen(function* () {
+      const spawned = yield* Deferred.make<void>();
+      const hungRunner = yield* ProcessRunner.make().pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Deferred.succeed(spawned, undefined).pipe(Effect.andThen(Effect.never)),
+          ),
+        ),
+      );
+      const { service } = yield* setup(macOS26, helperThat(hungRunner.run));
+      const transcription = yield* service
+        .transcribe({ audio, locale: "en" })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Deferred.await(spawned);
+      yield* TestClock.adjust("2 minutes");
+      const error = yield* Fiber.join(transcription);
+      assert.instanceOf(error, AppleSpeechHelper.AppleSpeechHelperError);
+      expect(error.reason).toBe("timeout");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
