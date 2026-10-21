@@ -2,8 +2,15 @@
 
 Transcription edits a composer draft. It does not submit an agent turn. Audio is
 temporary client input, and only normal message submission sends the resulting
-text. The current implementation transcribes locally on supported iOS devices;
-environment-backed transcription is not implemented.
+text. Supported iOS devices transcribe locally. Web and desktop upload the
+recording to the environment, which forwards it to the configured speech-to-text
+API, because the API key is an environment secret and never reaches a client.
+The client asks `voice.createTranscriptionUrl` for a short-lived capability URL
+and posts the audio there, so the upload works over every connection mode without
+a separate credential. Browsers record whatever container their engine supports,
+and the [web transcriber](../../apps/web/src/lib/voiceWav.ts) re-encodes every
+recording to 16 kHz mono WAV before upload, since xAI rejects WebM and a local
+whisper.cpp server would otherwise need ffmpeg.
 
 The [shared controller](../../packages/client-runtime/src/voice-input/controller.ts)
 owns the operation while the client supplies capture and transcription. Preparation
