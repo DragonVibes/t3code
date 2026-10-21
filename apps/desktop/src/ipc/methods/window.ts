@@ -311,7 +311,10 @@ export const openSystemSettings = DesktopIpc.makeIpcMethod({
     const opened = yield* shell.openSystemSettings(pane);
     if (opened && environment.isPackaged) {
       const permissions = yield* MacPermissions.MacPermissions;
-      const isGranted = yield* safariPermissionCheck;
+      const isGranted =
+        pane === "full-disk-access"
+          ? yield* safariPermissionCheck
+          : () => Electron.systemPreferences.getMediaAccessStatus("microphone") === "granted";
       yield* permissions.showHelper(pane, owner, isGranted);
     }
     return opened;

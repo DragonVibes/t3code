@@ -49,6 +49,28 @@ also send files to T3 Code through another app's system share sheet.
 
 See [images and videos](#images-and-videos-in-messages) for previewing and saving media.
 
+## Voice input on desktop and web
+
+Dictate a message instead of typing it. Turn it on under **Settings → General →
+Voice input**, where you choose who transcribes: a free whisper.cpp server on the
+machine running T3 Code, Apple's on-device engine when that machine is a Mac on
+macOS 26 or later, or a hosted API from OpenAI, Groq, or xAI with your own API
+key. The key stays on that machine. Audio goes to the T3 Code server, which sends
+it to the provider you chose, so hosted options bill per use.
+
+Press the microphone button in the composer, or `Cmd+Shift+Space` on macOS and
+`Ctrl+Shift+Space` elsewhere, to start recording. Press the same button, or the
+shortcut, again to stop. The transcript is inserted at your cursor for you to
+review and edit; nothing is sent until you send the message. Press Esc to discard
+a recording. A recording stops on its own after 5 minutes. Change
+`composer.toggleDictation` in **Settings → Keybindings** to use another shortcut.
+
+The browser asks for microphone access the first time. If you decline, allow the
+microphone for this site in your browser's settings. On the desktop app for macOS,
+allow it under **System Settings → Privacy & Security → Microphone**. Voice input
+is unavailable on plain `http://` connections other than localhost, because
+browsers only expose the microphone on secure origins.
+
 ## Send while the agent is working
 
 On web and desktop, choose **Settings → General → Follow-up behavior** to queue

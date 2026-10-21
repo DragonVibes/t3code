@@ -1066,6 +1066,8 @@ import {
 } from "lucide-react";
 import { proposedPlanTitle } from "@t3tools/shared/proposedPlanText";
 import { hasProviderSetup } from "./ProviderStatusBanner";
+import { ComposerVoiceInputControl } from "./ComposerVoiceInputControl";
+import { useComposerVoiceInput } from "./useComposerVoiceInput";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
@@ -1458,6 +1460,7 @@ export interface ChatComposerHandle {
   isModelPickerOpen: () => boolean;
   isCaretAtStart: () => boolean;
   compactContext: () => void;
+  toggleDictation: () => boolean;
   readSnapshot: () => {
     value: string;
     cursor: number;
@@ -2078,6 +2081,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
   const questionPreparations = useQuestionAttachmentPreparation((state) => state.counts);
   const prompt = composerDraft.prompt;
+  const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
+  const readVoiceDraftStable = useStableCallback(() => {
+    const text = promptRef.current;
+    const editor = composerEditorRef.current;
+    // The editor's selection only indexes the text it was read from.
+    const selection =
+      editor && editor.readSnapshot().value === text
+        ? editor.readSelectionRange()
+        : { start: text.length, end: text.length };
+    return { ownerKey: composerDraftTargetKey, text, selection };
+  });
+  // sendDisabledReason needs voice input before applyPromptReplacement is declared, and
+  // the React Compiler rejects a closure that captures a const declared later. The
+  // layout effect below that declaration fills this in.
+  const voiceCommitRef = useRef<
+    ((text: string, selection: { readonly start: number; readonly end: number }) => void) | null
+  >(null);
+  const commitVoiceDraftStable = useStableCallback(
+    (text: string, selection: { readonly start: number; readonly end: number }) => {
+      voiceCommitRef.current?.(text, selection);
+    },
+  );
+  const voiceInput = useComposerVoiceInput({
+    environmentId,
+    ownerKey: composerDraftTargetKey,
+    language: settings.voiceTranscription.language,
+    draftText: prompt,
+    readDraft: readVoiceDraftStable,
+    commitDraft: commitVoiceDraftStable,
+  });
   const composerImages = attachmentDraft.images;
   const composerFiles = attachmentDraft.files;
   const inlineFileIdSet = (() => {
@@ -2356,6 +2389,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const sendDisabledReason =
     externalSendDisabledReason ??
+    (voiceInput.busy ? "Finish voice input first." : null) ??
     (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
     (activePendingProgress
       ? attachmentBlockReason
@@ -2480,7 +2514,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     !hasMultilinePrompt &&
     pendingUserInputs.length === 0;
 
-  const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
   const pasteAsTextShortcutUntilRef = useRef(0);
   const pastedTextFileNamesRef = useRef<{ targetKey: string; names: Set<string> }>({
     targetKey: "",
@@ -2843,6 +2876,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (!activePendingProgress ||
       (supportsQuestionAttachments &&
         activePendingProgress.activeQuestion?.allowCustomAnswer !== false));
+  const showComposerVoiceAction =
+    settings.voiceTranscription.enabled &&
+    canOperateThread &&
+    !isConnecting &&
+    !isComposerApprovalState &&
+    !projectSelectionRequired &&
+    !isChoiceOnlyPendingQuestion &&
+    !activePendingIsResponding;
   const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
 
   const isComposerMenuLoading =
@@ -3784,6 +3825,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return true;
   };
   const applyPromptReplacementStable = useStableCallback(applyPromptReplacement);
+  useLayoutEffect(() => {
+    voiceCommitRef.current = (text, selection) => {
+      applyPromptReplacement(0, promptRef.current.length, text, {
+        expandedCursorAfterReplace: selection.start,
+      });
+    };
+  });
 
   const readComposerSnapshot = (): {
     value: string;
@@ -6117,6 +6165,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       focusAt: (cursor: number) => {
         composerEditorRef.current?.focusAt(cursor);
       },
+      toggleDictation: () => {
+        if (!showComposerVoiceAction && !voiceInput.busy) return false;
+        voiceInput.toggle();
+        return true;
+      },
       restoreAfterTimelineReachedEnd,
       collapseForTimelineScrollKey: (key) => {
         const scrollNode = getTimelineScrollableNode();
@@ -6394,6 +6447,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       getTimelineScrollableNode,
       isTimelineAtLogicalEnd,
       setIsComposerScrollCollapsed,
+      showComposerVoiceAction,
+      voiceInput.busy,
+      voiceInput.toggle,
     ],
   );
 
@@ -7207,7 +7263,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isComposerApprovalState ||
                       projectSelectionRequired ||
                       isChoiceOnlyPendingQuestion ||
-                      activePendingIsResponding
+                      activePendingIsResponding ||
+                      voiceInput.busy
                     }
                   />
                 </ComposerContextActionsContext>
@@ -7321,6 +7378,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         <TooltipPopup>Attach files</TooltipPopup>
                       </Tooltip>
                     </>
+                  ) : null}
+                  {showComposerVoiceAction || voiceInput.busy ? (
+                    <ComposerVoiceInputControl
+                      state={voiceInput.state}
+                      shortcutLabel={shortcutLabelForCommand(
+                        keybindings,
+                        "composer.toggleDictation",
+                      )}
+                      readStartedAt={voiceInput.readStartedAt}
+                      readLevel={voiceInput.readLevel}
+                      onToggle={voiceInput.toggle}
+                      onCancel={voiceInput.cancel}
+                    />
                   ) : null}
                   <ComposerFooterPrimaryActions
                     compact={isComposerResting || isComposerPrimaryActionsCompact}
