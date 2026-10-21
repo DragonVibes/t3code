@@ -359,6 +359,25 @@ function translateLegacyProjectOverridePatch(
   } as ServerSettingsPatch;
 }
 
+function endpointOrigin(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).origin;
+  } catch {
+    return baseUrl;
+  }
+}
+
+/** A saved key belongs to the service it was entered for, so it never follows a move to another. */
+function movesVoiceTranscriptionEndpoint(
+  current: ServerSettings["voiceTranscription"],
+  next: ServerSettings["voiceTranscription"],
+): boolean {
+  return (
+    current.provider !== next.provider ||
+    endpointOrigin(current.baseUrl) !== endpointOrigin(next.baseUrl)
+  );
+}
+
 export function applyServerSettingsPatch(
   current: ServerSettings,
   rawPatch: ServerSettingsPatch,
@@ -590,6 +609,11 @@ export function applyServerSettingsPatch(
       : {}),
     ...(automaticGitFetchInterval !== undefined ? { automaticGitFetchInterval } : {}),
     ...(providerHealthRefreshInterval !== undefined ? { providerHealthRefreshInterval } : {}),
+    ...(patch.voiceTranscription !== undefined &&
+    patch.voiceTranscription.apiKey === undefined &&
+    movesVoiceTranscriptionEndpoint(current.voiceTranscription, next.voiceTranscription)
+      ? { voiceTranscription: { ...next.voiceTranscription, apiKey: "" } }
+      : {}),
   };
   const normalizedBackgroundActivity = normalizeBackgroundActivitySettings(
     nextWithReplacementsBase.backgroundActivity,
