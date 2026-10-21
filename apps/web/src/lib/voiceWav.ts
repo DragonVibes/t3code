@@ -1,6 +1,7 @@
 export const VOICE_WAV_SAMPLE_RATE = 16_000;
 
 const WAV_HEADER_BYTES = 44;
+const PLATFORM_IS_LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 
 function writeAscii(view: DataView, offset: number, text: string): void {
   for (let index = 0; index < text.length; index += 1) {
@@ -9,6 +10,8 @@ function writeAscii(view: DataView, offset: number, text: string): void {
 }
 
 export function encodeWavPcm16(samples: ArrayLike<number>, sampleRate: number): ArrayBuffer {
+  // Int16Array writes in platform byte order, and WAV requires little-endian.
+  if (!PLATFORM_IS_LITTLE_ENDIAN) throw new Error("WAV encoding needs a little-endian platform.");
   const dataBytes = samples.length * 2;
   const buffer = new ArrayBuffer(WAV_HEADER_BYTES + dataBytes);
   const view = new DataView(buffer);
@@ -25,18 +28,16 @@ export function encodeWavPcm16(samples: ArrayLike<number>, sampleRate: number): 
   view.setUint16(34, 16, true);
   writeAscii(view, 36, "data");
   view.setUint32(40, dataBytes, true);
+  const pcm = new Int16Array(buffer, WAV_HEADER_BYTES, samples.length);
   for (let index = 0; index < samples.length; index += 1) {
     const clamped = Math.max(-1, Math.min(1, samples[index] ?? 0));
-    view.setInt16(
-      WAV_HEADER_BYTES + index * 2,
-      clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff,
-      true,
-    );
+    pcm[index] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
   }
   return buffer;
 }
 
-export function downmixToMono(audio: AudioBuffer): Float32Array {
+function downmixToMono(audio: AudioBuffer): Float32Array {
+  if (audio.numberOfChannels === 1) return audio.getChannelData(0);
   const mono = new Float32Array(audio.length);
   for (let channel = 0; channel < audio.numberOfChannels; channel += 1) {
     const samples = audio.getChannelData(channel);
