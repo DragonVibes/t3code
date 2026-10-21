@@ -27,11 +27,18 @@ export type VoiceTranscriptionErrorCode =
 /** `message` is shown to the user as written, so phrase it for them. */
 export class VoiceTranscriptionError extends Error {
   readonly code: VoiceTranscriptionErrorCode;
+  /** Sending the same recording again may succeed, as after a network or provider failure. */
+  readonly retryable: boolean;
 
-  constructor(code: VoiceTranscriptionErrorCode, message: string, options?: ErrorOptions) {
+  constructor(
+    code: VoiceTranscriptionErrorCode,
+    message: string,
+    options?: ErrorOptions & { readonly retryable?: boolean },
+  ) {
     super(message, options);
     this.name = "VoiceTranscriptionError";
     this.code = code;
+    this.retryable = options?.retryable ?? false;
   }
 }
 

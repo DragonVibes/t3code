@@ -10,7 +10,11 @@ import {
   type VoiceInputControllerDependencies,
   type VoiceRecorder,
 } from "./controller.ts";
-import type { PreparedVoiceTranscription, VoiceTranscriber } from "./transcription.ts";
+import {
+  VoiceTranscriptionError,
+  type PreparedVoiceTranscription,
+  type VoiceTranscriber,
+} from "./transcription.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -33,6 +37,10 @@ function preparedTranscription(
   transcribe: PreparedVoiceTranscription["transcribe"] = async () => "new text",
 ): PreparedVoiceTranscription {
   return { locale: "en-US", transcribe };
+}
+
+function uploadFailed(): VoiceTranscriptionError {
+  return new VoiceTranscriptionError("transcription-failed", "Upload failed", { retryable: true });
 }
 
 function draft(overrides: Partial<VoiceDraftSnapshot> = {}): VoiceDraftSnapshot {
@@ -139,7 +147,7 @@ describe("VoiceInputController", () => {
               getTranscriber: () => ({
                 prepare: async () =>
                   preparedTranscription(async () => {
-                    throw new Error("Transcription failed");
+                    throw uploadFailed();
                   }),
               }),
             },
@@ -168,7 +176,7 @@ describe("VoiceInputController", () => {
   it("keeps the recording after transcription fails and sends the same audio on retry", async () => {
     const transcribe = vi
       .fn<PreparedVoiceTranscription["transcribe"]>()
-      .mockRejectedValueOnce(new Error("Upload failed"))
+      .mockRejectedValueOnce(uploadFailed())
       .mockResolvedValue("new text");
     const prepare = vi.fn(async () => preparedTranscription(transcribe));
     const harness = createHarness({ getTranscriber: () => ({ prepare }) });
@@ -200,7 +208,7 @@ describe("VoiceInputController", () => {
       getTranscriber: () => ({
         prepare: async () =>
           preparedTranscription(async () => {
-            throw new Error("Upload failed");
+            throw uploadFailed();
           }),
       }),
     });
@@ -214,13 +222,62 @@ describe("VoiceInputController", () => {
     expect(harness.deleted).toEqual(["file:///voice.m4a"]);
   });
 
+  it("deletes the recording and offers no retry when resending it cannot help", async () => {
+    const transcribe = vi.fn<PreparedVoiceTranscription["transcribe"]>(async () => {
+      throw new VoiceTranscriptionError("unavailable", "Add an OpenAI API key.");
+    });
+    const harness = createHarness({
+      getTranscriber: () => ({ prepare: async () => preparedTranscription(transcribe) }),
+    });
+    await harness.controller.start();
+    await harness.controller.stop();
+
+    expect(harness.controller.currentState).toEqual({
+      phase: "error",
+      error: "Add an OpenAI API key.",
+      errorAction: null,
+    });
+    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
+    await harness.controller.retryTranscription();
+    expect(transcribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a kept recording when its resend can no longer succeed", async () => {
+    let enabled = true;
+    const harness = createHarness({
+      getTranscriber: () => ({
+        prepare: async () => {
+          if (!enabled) {
+            throw new VoiceTranscriptionError("unavailable", "Voice transcription is turned off.");
+          }
+          return preparedTranscription(async () => {
+            throw uploadFailed();
+          });
+        },
+      }),
+    });
+    await harness.controller.start();
+    await harness.controller.stop();
+    expect(harness.controller.currentState.errorAction).toBe("retry-transcription");
+
+    enabled = false;
+    await harness.controller.retryTranscription();
+
+    expect(harness.controller.currentState).toMatchObject({
+      phase: "error",
+      error: "Voice transcription is turned off.",
+      errorAction: null,
+    });
+    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
+  });
+
   it("deletes a failed recording at once when the client does not retain it", async () => {
     const harness = createHarness({
       retainFailedRecordings: false,
       getTranscriber: () => ({
         prepare: async () =>
           preparedTranscription(async () => {
-            throw new Error("Upload failed");
+            throw uploadFailed();
           }),
       }),
     });
@@ -238,7 +295,7 @@ describe("VoiceInputController", () => {
         getTranscriber: () => ({
           prepare: async () =>
             preparedTranscription(async () => {
-              throw new Error("Upload failed");
+              throw uploadFailed();
             }),
         }),
       });

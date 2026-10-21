@@ -119,7 +119,7 @@ describe("createEnvironmentVoiceTranscriber", () => {
       },
     });
     const error = await transcriptionError(transcribe(broken));
-    expect(error.code).toBe("transcription-failed");
+    expect(error).toMatchObject({ code: "transcription-failed", retryable: false });
     expect(broken.mintInputs).toHaveLength(0);
   });
 
@@ -162,7 +162,25 @@ describe("createEnvironmentVoiceTranscriber", () => {
     const opaque = await transcriptionError(
       transcribe(createHarness({ post: { status: 500, body: "<html>" } })),
     );
-    expect(opaque.code).toBe("transcription-failed");
+    expect(opaque).toMatchObject({ code: "transcription-failed", retryable: true });
+
+    const unreachable = await transcriptionError(
+      transcribe(createHarness({ post: () => Promise.reject(new TypeError("fetch failed")) })),
+    );
+    expect(unreachable).toMatchObject({ code: "transcription-failed", retryable: true });
+  });
+
+  it.each([
+    ["upstream_failed", 502, true],
+    ["internal", 500, true],
+    ["not_configured", 409, false],
+    ["invalid_upload", 400, false],
+    ["upstream_rejected_credentials", 502, false],
+  ] as const)("marks a %s failure retryable: %s", async (code, status, retryable) => {
+    const error = await transcriptionError(
+      transcribe(createHarness({ post: { status, body: { code, message: "Refused." } } })),
+    );
+    expect(error.retryable).toBe(retryable);
   });
 
   it("maps a refused URL mint to unavailable with the environment's own reason", async () => {
@@ -183,6 +201,7 @@ describe("createEnvironmentVoiceTranscriber", () => {
     expect(decoded).toMatchObject({
       code: "unavailable",
       message: "Add an xAI API key to use voice transcription.",
+      retryable: false,
     });
 
     const encoded = await refusedBy({
@@ -207,12 +226,12 @@ describe("createEnvironmentVoiceTranscriber", () => {
         }),
       ),
     );
-    expect(offline.code).toBe("transcription-failed");
+    expect(offline).toMatchObject({ code: "transcription-failed", retryable: true });
 
     const disconnected = await transcriptionError(
       transcribe(createHarness({ resolveUrl: () => null })),
     );
-    expect(disconnected.code).toBe("transcription-failed");
+    expect(disconnected).toMatchObject({ code: "transcription-failed", retryable: true });
   });
 
   it("settles as cancelled only after the upload itself has been aborted", async () => {
@@ -317,7 +336,7 @@ describe("createEnvironmentVoiceTranscriber", () => {
   ])("rejects %s before minting a URL", async (_label, audio) => {
     const harness = createHarness({ audio });
     const error = await transcriptionError(transcribe(harness));
-    expect(error.code).toBe("transcription-failed");
+    expect(error).toMatchObject({ code: "transcription-failed", retryable: false });
     expect(harness.mintInputs).toHaveLength(0);
     expect(harness.posts).toHaveLength(0);
   });

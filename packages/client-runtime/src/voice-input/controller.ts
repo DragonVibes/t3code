@@ -201,6 +201,11 @@ function transcriptionErrorMessage(error: unknown): string {
   return "Could not transcribe this recording.";
 }
 
+function isRetryable(error: unknown): boolean {
+  if (error instanceof Error && error.message === "voice-operation-busy") return true;
+  return error instanceof VoiceTranscriptionError && error.retryable;
+}
+
 function startErrorMessage(error: unknown): string {
   return error instanceof VoiceRecorderError ? error.message : "Could not start voice recording.";
 }
@@ -346,7 +351,7 @@ export class VoiceInputController {
         transcription = await runTranscriptionOperation(() => transcriber.prepare({ signal }));
       } catch (error) {
         if (this.isCurrent(operationToken)) {
-          this.holdRecordingForRetry(recordingUri, preparationErrorMessage(error));
+          this.failTranscription(recordingUri, error, preparationErrorMessage(error));
         }
         return;
       }
@@ -520,11 +525,8 @@ export class VoiceInputController {
         transcription.transcribe(recordingUri, { signal: input.signal }),
       );
     } catch (error) {
-      if (!this.isCurrent(operationToken)) return;
-      if (this.dependencies.retainFailedRecordings) {
-        this.holdRecordingForRetry(recordingUri, transcriptionErrorMessage(error));
-      } else {
-        this.setError(transcriptionErrorMessage(error), "retry");
+      if (this.isCurrent(operationToken)) {
+        this.failTranscription(recordingUri, error, transcriptionErrorMessage(error));
       }
       return;
     }
@@ -547,6 +549,16 @@ export class VoiceInputController {
       return;
     }
     this.setState(IDLE_STATE);
+  }
+
+  /** Unheld audio is deleted when the operation releases its resources. */
+  private failTranscription(uri: string, error: unknown, message: string): void {
+    const retryable = isRetryable(error);
+    if (retryable && this.dependencies.retainFailedRecordings) {
+      this.holdRecordingForRetry(uri, message);
+    } else {
+      this.setError(message, retryable ? "retry" : null);
+    }
   }
 
   private holdRecordingForRetry(uri: string, error: string): void {

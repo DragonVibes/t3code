@@ -7,6 +7,7 @@ import {
   VoiceTranscriptionResult,
   type VoiceTranscriptionCreateUrlInput,
   type VoiceTranscriptionCreateUrlResult,
+  type VoiceTranscriptionFailureCode,
   type VoiceTranscriptionNotConfiguredReason,
   type VoiceTranscriptionProvider,
   type VoiceTranscriptionSettings,
@@ -44,6 +45,15 @@ const decodeMimeType = Schema.decodeUnknownOption(VoiceTranscriptionAudioMimeTyp
 const decodeResult = Schema.decodeUnknownOption(VoiceTranscriptionResult);
 const decodeFailure = Schema.decodeUnknownOption(VoiceTranscriptionFailure);
 const decodeNotConfigured = Schema.decodeUnknownOption(VoiceTranscriptionNotConfiguredError);
+
+/** Whether sending the same recording again can succeed without a settings change. */
+const RETRYABLE_FAILURES: Record<VoiceTranscriptionFailureCode, boolean> = {
+  not_configured: false,
+  invalid_upload: false,
+  upstream_rejected_credentials: false,
+  upstream_failed: true,
+  internal: true,
+};
 
 /** The server's names, which its not-configured messages quote. */
 const PROVIDER_NAMES: Record<VoiceTranscriptionProvider, string> = {
@@ -117,11 +127,13 @@ function failureFromResponse(status: number, body: unknown): VoiceTranscriptionE
     return new VoiceTranscriptionError(
       "transcription-failed",
       `The environment could not transcribe the recording (HTTP ${status}).`,
+      { retryable: true },
     );
   }
   return new VoiceTranscriptionError(
     failure.code === "not_configured" ? "unavailable" : "transcription-failed",
     failure.message,
+    { retryable: RETRYABLE_FAILURES[failure.code] },
   );
 }
 
@@ -187,7 +199,7 @@ export function createEnvironmentVoiceTranscriber(
       throw new VoiceTranscriptionError(
         "transcription-failed",
         "Could not reach the environment to transcribe the recording.",
-        { cause: error },
+        { cause: error, retryable: true },
       );
     }
     throwIfVoiceTranscriptionAborted(signal);
@@ -197,6 +209,7 @@ export function createEnvironmentVoiceTranscriber(
       throw new VoiceTranscriptionError(
         "transcription-failed",
         "The environment is not connected.",
+        { retryable: true },
       );
     }
 
@@ -217,7 +230,7 @@ export function createEnvironmentVoiceTranscriber(
       throw new VoiceTranscriptionError(
         "transcription-failed",
         "Could not reach the environment to transcribe the recording.",
-        { cause: error },
+        { cause: error, retryable: true },
       );
     }
 
@@ -230,6 +243,7 @@ export function createEnvironmentVoiceTranscriber(
       throw new VoiceTranscriptionError(
         "transcription-failed",
         "The environment returned an unexpected transcription response.",
+        { retryable: true },
       );
     }
     return result.text;

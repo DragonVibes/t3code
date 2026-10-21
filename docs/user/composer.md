@@ -68,9 +68,11 @@ Press the microphone button in the composer, or `Cmd+Shift+Space` on macOS and
 shortcut, again to stop. The transcript is inserted at your cursor for you to
 review and edit; nothing is sent until you send the message. Press Esc to discard
 a recording. A recording stops on its own after 5 minutes. If transcription
-fails, **Retry** sends the same recording again; dismissing the error discards
-it. Change `composer.toggleDictation` in **Settings → Keybindings** to use
-another shortcut.
+fails because of the connection or the provider, **Retry** sends the same
+recording again; dismissing the error discards it. A failure that needs a
+settings change, such as a missing or rejected API key, discards the recording
+right away. Change `composer.toggleDictation` in **Settings → Keybindings** to
+use another shortcut.
 
 The browser asks for microphone access the first time. If you decline, allow the
 microphone for this site in your browser's settings. In the desktop app, allow it

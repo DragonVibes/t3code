@@ -44,9 +44,13 @@ transcript cannot overwrite a draft that was edited or replaced; a draft that
 refuses the text, such as a choice-only agent question, counts as changed. On web
 and desktop, a transcription that fails after the recording succeeded keeps the
 audio behind the `retry-transcription` error action until the user retries,
-dismisses, or starts over, so a failed upload does not cost the recording. Holding
-it is the client's opt-in, `retainFailedRecordings`. Mobile leaves it off, because
-its retry records anew and a kept file would only wait for the next start.
+dismisses, or starts over, so a failed upload does not cost the recording. It
+keeps the audio only when the transcriber marks the failure `retryable`, such as
+a network, provider, or server error. A failure that sending the same audio
+cannot fix, such as missing settings, rejected credentials, or an unusable
+recording, deletes it and offers no retry. Holding it is the client's opt-in,
+`retainFailedRecordings`. Mobile leaves it off, because its retry records anew
+and a kept file would only wait for the next start.
 
 Cancellation invalidates a result immediately, but resources stay owned until the
 underlying work settles. Apple's native transcription call cannot be interrupted

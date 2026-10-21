@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import type { PreparedVoiceTranscription } from "@t3tools/client-runtime/voice-input";
+import {
+  VoiceTranscriptionError,
+  type PreparedVoiceTranscription,
+} from "@t3tools/client-runtime/voice-input";
 import { Atom, AtomRegistry } from "effect/reactivity";
 import { resetVoiceInputGlobalsForTests } from "../../../../../packages/client-runtime/src/voice-input/controller";
 
@@ -159,7 +162,9 @@ describe("global voice input", () => {
     prepare.mockResolvedValueOnce({
       locale: "en-US",
       transcribe: async () => {
-        throw new Error("Upload failed");
+        throw new VoiceTranscriptionError("transcription-failed", "Upload failed", {
+          retryable: true,
+        });
       },
     });
     await session.start(createTarget("first", () => "hello", vi.fn(), { start: 5, end: 5 }));
